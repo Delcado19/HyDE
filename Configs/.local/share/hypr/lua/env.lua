@@ -13,7 +13,7 @@ for segment in (current_path .. ":"):gmatch("([^:]*):") do
 	end
 end
 if not already_on_path then
-	hl.env("PATH", current_path .. ":" .. hyde.path.lib)
+	hl.env("PATH", current_path == "" and hyde.path.lib or current_path .. ":" .. hyde.path.lib)
 end
 -- ? Isolate dconf (Prevents already-opened GTK apps (brave, nwg-displays, etc.) from updating their theme)
 -- hl.env("DCONF_PROFILE",  ((os.getenv("XDG_CONFIG_HOME") ~= "" and os.getenv("XDG_CONFIG_HOME")) or (os.getenv("HOME") or "" ) .. "/.config") .. "/dconf/profile/hyde_hyprland")
