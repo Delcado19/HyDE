@@ -68,6 +68,8 @@ print("    PATH after two reloads: " .. real_path)
 real_path = ""
 load_once()
 check(real_path:sub(1, 1) ~= ":", string.format("PATH starts with an empty segment on an empty inherited PATH -- %q", real_path))
+check(count_segment(real_path, lib) == 1,
+    string.format("PATH must contain exactly one copy of %s -- %q", lib, real_path))
 print("    PATH from an empty inherited PATH: " .. real_path)
 
 os.exit(failures == 0 and 0 or 1)
