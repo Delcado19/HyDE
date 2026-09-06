@@ -542,4 +542,33 @@ function M.nvidia_query(opts)
     return fields, false
 end
 
+--- AMD vendor branch. Parses amdgpu.py's JSON (see Configs/.local/lib/hyde/
+--- amdgpu.py) with luautils.json instead of `jq`+`sed`. Falls back to the
+--- generic sensors/proc-stat/cpufreq/battery reads whenever the output isn't
+--- the expected object -- covers "No AMD GPUs detected." (amdgpu.py's own
+--- explicit no-hardware message) *and* any of amdgpu.py's exception-branch
+--- error strings, which the bash version's two-literal-substring check did
+--- not (it would have tried to jq-parse those as JSON).
+function M.amd_query(opts)
+    local fields = {primary_gpu = "AMD " .. opts.amdgpu_gpu}
+
+    local ok, decoded = pcall(json.decode, opts.amdgpu_output or "")
+    if ok and type(decoded) == "table" and decoded["GPU Temperature"] then
+        fields.temperature = decoded["GPU Temperature"]:gsub("°C", "")
+        fields.utilization = decoded["GPU Load"]:gsub("%%", "")
+        fields.core_clock = decoded["GPU Core Clock"]:gsub(" GHz", ""):gsub(" MHz", "")
+        fields.power_usage = decoded["GPU Power Usage"]:gsub(" Watts", "")
+        return fields
+    end
+
+    local temperature, fan_speed = M.read_sensors(opts.sensors_json or "")
+    fields.temperature = temperature
+    fields.fan_speed = fan_speed
+    fields.power_discharge = M.read_battery_discharge(opts.power_supply_dir or "/sys/class/power_supply")
+    local state = opts.state or {}
+    fields.utilization = M.read_cpu_utilization(state, opts.stat_file)
+    fields.current_clock_speed, fields.max_clock_speed = M.read_cpu_clock_speed(opts.cpu_sysfs_dir)
+    return fields
+end
+
 return M
