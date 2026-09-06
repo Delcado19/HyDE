@@ -102,23 +102,36 @@ local function lookup_pci_name(lspci_cmd, addr)
     if not line then
         return nil
     end
-    -- "00:02.0 VGA compatible controller [0300]: Intel Corporation Iris Xe Graphics [8086:9a49] (rev 01)"
-    -- -> "Iris Xe Graphics" (drop the vendor prefix, the [ids] suffix, the (rev) suffix).
+    -- "00:02.0 VGA compatible controller [0300]: Intel Corporation Kaby Lake-U GT2 [HD Graphics 620] [8086:5916] (rev 02)"
+    -- -> "Kaby Lake-U GT2 [HD Graphics 620]" (drop the vendor prefix, the
+    -- trailing [ids] bracket, and the (rev) suffix -- but keep a marketing-
+    -- name bracket like "[HD Graphics 620]" or "[GeForce RTX 3060]": that's
+    -- the name most people actually know the card by, unlike the bare
+    -- codename bash's original `gsub(/ *\[[^\]]*\]/,"")` left behind).
     -- Anchored on "]:" (the class-id's closing bracket), not a bare ":" --
     -- the PCI slot itself ("00:02.0") contains a colon earlier in the line,
     -- and Lua patterns search from the first position that matches, so a
     -- bare ":" anchor grabs everything after the *slot's* colon instead
     -- (verified empirically while writing this plan: a bare ":" pattern
     -- against the example line above returns "02.0 VGA compatible
-    -- controller [0300]: Intel Corporation Iris Xe Graphics ..." --  the
+    -- controller [0300]: Intel Corporation Kaby Lake-U GT2 ..." --  the
     -- slot number leaking into the name -- not the intended match).
     local rest = line:match("%]:%s*(.+)$")
     if not rest then
         return nil
     end
+    -- Only the trailing [vendor:device] id bracket is stripped -- it's
+    -- always exactly 4 hex digits either side of the colon, which a
+    -- marketing-name bracket never is, so this can't misfire on one.
     rest = rest:gsub("%[%x%x%x%x:%x%x%x%x%]", ""):gsub("%(rev%s*%x+%)", "")
     rest = rest:gsub("^%s+", ""):gsub("%s+$", "")
     rest = rest:gsub("^%a+ ?%a*%a* Corporation,? ?", ""):gsub("^Advanced Micro Devices, Inc%.,? ?", "")
+    -- pci.ids lists AMD's vendor name as "Advanced Micro Devices, Inc.
+    -- [AMD/ATI]" -- that bracket is a vendor alias, not part of the chip's
+    -- identity, and unlike a genuine marketing-name bracket it sits before
+    -- the codename rather than after it, so it must go even though the
+    -- rule above is to keep marketing brackets.
+    rest = rest:gsub("^%[AMD/ATI%] ?", "")
     return rest ~= "" and rest or nil
 end
 

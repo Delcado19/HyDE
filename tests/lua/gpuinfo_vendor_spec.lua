@@ -59,6 +59,63 @@ check(
     "intel_gpu was not resolved from the single targeted lspci call: got " .. tostring(result.intel_gpu)
 )
 
+-- Some chips (caught live on real Kaby Lake-U hardware) carry a marketing-
+-- name bracket ahead of the [ids] one -- it must survive stripping, since
+-- it's the name most people actually know the card by.
+local marketing_dir = work_dir .. "/pci_marketing"
+os.execute("mkdir -p " .. marketing_dir .. "/0000:00:02.0")
+write_file(marketing_dir .. "/0000:00:02.0/class", "0x030000\n")
+write_file(marketing_dir .. "/0000:00:02.0/vendor", "0x8086\n")
+write_file(fake_bin .. "/lspci", [[#!/bin/sh
+if [ "$3" = "0000:00:02.0" ]; then
+    echo "00:02.0 VGA compatible controller [0300]: Intel Corporation Kaby Lake-U GT2 [HD Graphics 620] [8086:5916] (rev 02)"
+else
+    echo "unexpected address: $3" >&2
+    exit 1
+fi
+]])
+os.execute("chmod +x " .. fake_bin .. "/lspci")
+
+local marketing_result = gpuinfo.detect_vendor({
+    pci_dir = marketing_dir,
+    modules_file = work_dir .. "/nonexistent-modules",
+    path_dirs = {fake_bin},
+    lspci_cmd = "lspci",
+})
+check(
+    marketing_result.intel_gpu == "Kaby Lake-U GT2 [HD Graphics 620]",
+    "a marketing-name bracket ahead of the [ids] one did not survive: got " .. tostring(marketing_result.intel_gpu)
+)
+
+-- AMD's pci.ids vendor string carries its own "[AMD/ATI]" alias bracket
+-- ahead of the codename -- that one must NOT survive (it's not a
+-- marketing name, it sits before the codename, and it would otherwise
+-- duplicate the "AMD " prefix gpuinfo.lua's own field assembly adds).
+local amd_marketing_dir = work_dir .. "/pci_amd_marketing"
+os.execute("mkdir -p " .. amd_marketing_dir .. "/0000:03:00.0")
+write_file(amd_marketing_dir .. "/0000:03:00.0/class", "0x030000\n")
+write_file(amd_marketing_dir .. "/0000:03:00.0/vendor", "0x1002\n")
+write_file(fake_bin .. "/lspci", [[#!/bin/sh
+if [ "$3" = "0000:03:00.0" ]; then
+    echo "03:00.0 VGA compatible controller [0300]: Advanced Micro Devices, Inc. [AMD/ATI] Navi 23 [Radeon RX 6600/6600 XT/6600M] [1002:73ff] (rev c1)"
+else
+    echo "unexpected address: $3" >&2
+    exit 1
+fi
+]])
+os.execute("chmod +x " .. fake_bin .. "/lspci")
+
+local amd_marketing_result = gpuinfo.detect_vendor({
+    pci_dir = amd_marketing_dir,
+    modules_file = work_dir .. "/nonexistent-modules",
+    path_dirs = {fake_bin},
+    lspci_cmd = "lspci",
+})
+check(
+    amd_marketing_result.amd_gpu == "Navi 23 [Radeon RX 6600/6600 XT/6600M]",
+    "AMD's own '[AMD/ATI]' vendor-alias bracket leaked into the name: got " .. tostring(amd_marketing_result.amd_gpu)
+)
+
 -- Out-of-spec: a device whose class file holds garbage (a race with a device
 -- being hot-unplugged, or a kernel quirk) must be skipped, not crash the scan.
 local garbage_dir = work_dir .. "/pci_garbage"
