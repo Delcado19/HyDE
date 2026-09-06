@@ -99,4 +99,30 @@ case $call in
 *) fail "-f (full rebuild) stopped scanning the custom wallpaper collection: got '$call'" ;;
 esac
 
+# getopts allows repeating flags, so a caller can pass -w together with -t/-f
+# (whichever HyDE itself does or not, getopts does not reject it). The last
+# flag processed has to win for single_wallpaper the same way it already does
+# for cacheIn/mode -- otherwise "-w file -f" would keep single_wallpaper=1
+# from the earlier -w branch and skip the custom-path scan a real -f needs.
+: >"$hashmap_calls_file"
+unset cacheIn mode wallHash wallList
+wallpaper_cache_commence -w "$single_wallpaper" -f >/dev/null 2>&1
+call=$(cat "$hashmap_calls_file")
+case $call in
+*"$custom_dir"*) ;;
+*) fail "-w followed by -f did not fall back to a full scan (single_wallpaper leaked across flags): got '$call'" ;;
+esac
+
+# And the reverse order: -f followed by -w must end up in single-file mode,
+# not have -f's custom-path scan stick around.
+: >"$hashmap_calls_file"
+unset cacheIn mode wallHash wallList
+wallpaper_cache_commence -f -w "$single_wallpaper" >/dev/null 2>&1
+call=$(cat "$hashmap_calls_file")
+case $call in
+*"$custom_dir"*)
+    fail "-f followed by -w still scanned the custom wallpaper collection: got '$call'"
+    ;;
+esac
+
 finish
