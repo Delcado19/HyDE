@@ -1,0 +1,66 @@
+local root = debug.getinfo(1, "S").source:match("^@(.*/)") or "./"
+package.path = root .. "../../Configs/.local/lib/hyde/?.lua;" .. package.path
+local gpuinfo = require("gpuinfo")
+local json = require("luautils.json")
+
+local failures = 0
+local function check(condition, message)
+    if not condition then
+        failures = failures + 1
+        print("    fail: " .. message)
+    end
+end
+
+-- generate_json must always produce something json.decode accepts -- this is
+-- the exact #2021/#2022 contract (waybar reads this line by line as JSON).
+local minimal = gpuinfo.generate_json({primary_gpu = "Not found"})
+local ok, decoded = pcall(json.decode, minimal)
+check(ok, "generate_json with no readings at all did not produce valid JSON: " .. tostring(minimal))
+check(ok and decoded.percentage ~= nil, "percentage was missing/null with no temperature reading")
+
+-- A full set of readings produces the documented tooltip segments.
+local full = gpuinfo.generate_json({
+    primary_gpu = "AMD Radeon RX 7800",
+    temperature = 62,
+    utilization = 45.0,
+    fan_speed = 1400,
+    current_clock_speed = 1800,
+    max_clock_speed = 3600,
+    power_usage = 120,
+    power_limit = 200,
+    power_discharge = 15.5,
+})
+local ok2, decoded2 = pcall(json.decode, full)
+check(ok2, "generate_json with a full field set did not produce valid JSON")
+check(decoded2.text:find("62"), "text field did not include the temperature")
+check(decoded2.tooltip:find("45"), "tooltip did not include utilization")
+check(decoded2.tooltip:find("1800/3600 MHz"), "tooltip did not include the clock speed segment in the documented format")
+check(decoded2.tooltip:find("120/200 W"), "tooltip did not include the power usage/limit segment")
+check(decoded2.tooltip:find("15.5 W"), "tooltip did not include the power discharge segment")
+check(decoded2.class[1] == "temp-60", "temperature class bucket was wrong: got " .. tostring(decoded2.class[1]))
+check(decoded2.class[2] == "util-40", "utilization class bucket was wrong: got " .. tostring(decoded2.class[2]))
+check(decoded2.percentage == 62, "percentage did not mirror the temperature")
+
+-- core_clock (the AMD-branch-only single-value clock reading) is a separate
+-- tooltip line from current/max clock speed, and the two must not both
+-- appear -- mirrors the bash version's two separate tooltip_parts entries
+-- under the same key.
+local core_clock_only = gpuinfo.generate_json({primary_gpu = "AMD Radeon", core_clock = 1500})
+local ok3, decoded3 = pcall(json.decode, core_clock_only)
+check(ok3, "generate_json with only core_clock did not produce valid JSON")
+check(decoded3.tooltip:find("1500 MHz"), "core_clock alone did not appear in the tooltip")
+
+-- Out-of-spec: a negative or absurd temperature (a sensor glitch) must still
+-- clamp into a valid bucket/percentage instead of producing an out-of-range
+-- or negative "percentage" waybar can't render sensibly.
+local negative = gpuinfo.generate_json({primary_gpu = "x", temperature = -5})
+local ok4, decoded4 = pcall(json.decode, negative)
+check(ok4, "a negative temperature broke JSON generation")
+check(decoded4.percentage == 0, "a negative temperature was not clamped to 0%%: got " .. tostring(decoded4.percentage))
+
+local huge = gpuinfo.generate_json({primary_gpu = "x", temperature = 5000})
+local ok5, decoded5 = pcall(json.decode, huge)
+check(ok5, "an absurdly high temperature broke JSON generation")
+check(decoded5.percentage == 100, "an absurd temperature was not clamped to 100%%: got " .. tostring(decoded5.percentage))
+
+os.exit(failures == 0 and 0 or 1)

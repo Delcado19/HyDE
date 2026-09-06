@@ -395,4 +395,99 @@ function M.read_sensors(sensors_json)
     return temperature, fan_speed
 end
 
+local function clamp(value, low, high)
+    if value < low then
+        return low
+    end
+    if value > high then
+        return high
+    end
+    return value
+end
+
+--- Ported 1:1 from the bash version's map_floor: given a "threshold:value,
+--- threshold:value, ..., default" spec string and a numeric value, returns
+--- the value for the highest threshold the number clears, or the default.
+function M.map_floor(spec, value)
+    local pairs_list = {}
+    for piece in (spec .. ","):gmatch("([^,]*),") do
+        local trimmed = piece:gsub("^%s+", ""):gsub("%s+$", "")
+        if trimmed ~= "" then
+            pairs_list[#pairs_list + 1] = trimmed
+        end
+    end
+    local default_val
+    if pairs_list[#pairs_list] and not pairs_list[#pairs_list]:find(":") then
+        default_val = pairs_list[#pairs_list]
+        pairs_list[#pairs_list] = nil
+    end
+    local num = tonumber(tostring(value):match("^-?%d+"))
+    for _, pair in ipairs(pairs_list) do
+        local key, val = pair:match("^([^:]*):(.*)$")
+        local key_num = key and tonumber(key)
+        if num and key_num and num > key_num then
+            return val
+        end
+    end
+    return default_val or " "
+end
+
+--- Assembles the waybar custom-module JSON object -- text/tooltip/class/
+--- percentage/alt -- from whatever fields a vendor branch (Tasks 9-11)
+--- populated. Always produces valid JSON, even with no readings at all
+--- (waybar's return-type:json reads this line by line; a malformed or empty
+--- line breaks the whole module, the #2021/#2022 contract this preserves).
+function M.generate_json(fields)
+    local emoji = fields.emoji
+    local temp_lv = emoji and "85:🌋, 65:🔥, 45:☁️, ❄️" or "85:, 65:, 45:☁, ❄"
+    local util_lv = "90:, 60:󰓅, 30:󰾅, 󰾆"
+    local speedo_icon = M.map_floor(util_lv, fields.utilization or 0)
+    local thermo_icon = M.map_floor(temp_lv, fields.temperature or -999)
+
+    local temp_val = fields.temperature and math.floor(fields.temperature) or nil
+    local temp_clamped = temp_val and clamp(temp_val, 0, 999) or 0
+    local temp_bucket = clamp(math.floor(temp_clamped / 5) * 5, 0, 100)
+    local temp_class = "temp-" .. temp_bucket
+
+    local util_val = fields.utilization and math.floor(fields.utilization) or 0
+    util_val = clamp(util_val, 0, 100)
+    local util_bucket = math.floor(util_val / 10) * 10
+    local util_class = "util-" .. util_bucket
+
+    local temp_pct = clamp(temp_val or 0, 0, 100)
+
+    local tooltip = (fields.primary_gpu or "Not found") .. "\n" .. thermo_icon .. " Temperature: " .. (temp_val or "") .. "°C"
+
+    if fields.utilization then
+        tooltip = tooltip .. "\n" .. speedo_icon .. " Utilization: " .. fields.utilization .. "%"
+    end
+    if fields.current_clock_speed and fields.max_clock_speed then
+        tooltip = tooltip .. "\n Clock Speed: " .. fields.current_clock_speed .. "/" .. fields.max_clock_speed .. " MHz"
+    end
+    if fields.core_clock then
+        tooltip = tooltip .. "\n Clock Speed: " .. fields.core_clock .. " MHz"
+    end
+    if fields.power_usage then
+        if fields.power_limit then
+            tooltip = tooltip .. "\n󱪉 Power Usage: " .. fields.power_usage .. "/" .. fields.power_limit .. " W"
+        else
+            tooltip = tooltip .. "\n󱪉 Power Usage: " .. fields.power_usage .. " W"
+        end
+    end
+    if fields.power_discharge and tostring(fields.power_discharge) ~= "0" then
+        tooltip = tooltip .. "\n Power Discharge: " .. fields.power_discharge .. " W"
+    end
+    if fields.fan_speed then
+        tooltip = tooltip .. "\n Fan Speed: " .. fields.fan_speed .. " RPM"
+    end
+
+    return json.encode({
+        text = thermo_icon .. " " .. (temp_val or "") .. "°C",
+        tooltip = tooltip,
+        class = {temp_class, util_class},
+        percentage = temp_pct,
+        alt = tostring(temp_bucket),
+    })
+end
+
 return M
