@@ -182,18 +182,22 @@ esac
 # bash's arithmetic evaluator throws its own "syntax error" for anything that
 # isn't a plain integer (e.g. a decimal point), printing a diagnostic to
 # stderr on every single poll. That is the same class of regression #2028 set
-# out to remove, just from a different builtin. LC_ALL=C.utf8 keeps the
+# out to remove, just from a different builtin. A UTF-8 C locale keeps the
 # assertion below from depending on the host's locale, since bash localizes
 # this message (this project's own dev machine has it in German) -- plain
 # LC_ALL=C would also do that but switches the charset to ASCII, which
 # mangles the icons the JSON output embeds and breaks the JSON-shape check
-# below for an unrelated reason.
+# below for an unrelated reason. The exact locale name for that isn't
+# portable ("C.utf8" vs. "C.UTF-8"), so pick whichever this host actually
+# has rather than hardcoding one.
+utf8_c_locale=$(locale -a 2>/dev/null | grep -iE '^C\.utf-?8$' | head -n1)
+utf8_c_locale=${utf8_c_locale:-C.UTF-8}
 malformed_cpu_sysfs=$(mktemp -d)
 mkdir -p "$malformed_cpu_sysfs/cpufreq/policy0" "$malformed_cpu_sysfs/cpu0/cpufreq"
 printf '12.5' >"$malformed_cpu_sysfs/cpufreq/policy0/scaling_cur_freq"
 printf 'not-a-number' >"$malformed_cpu_sysfs/cpu0/cpufreq/cpuinfo_max_freq"
 rm -f "$state_file"
-malformed_stdout=$(LC_ALL=C.utf8 GPUINFO_CPU_SYSFS_DIR="$malformed_cpu_sysfs" PATH="$fake_bin:$PATH" bash "$script" \
+malformed_stdout=$(LC_ALL="$utf8_c_locale" GPUINFO_CPU_SYSFS_DIR="$malformed_cpu_sysfs" PATH="$fake_bin:$PATH" bash "$script" \
     2>"$stderr_file")
 malformed_status=$?
 malformed_stderr=$(cat "$stderr_file")

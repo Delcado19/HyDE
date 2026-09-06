@@ -242,9 +242,11 @@ general_query() {
     # bash passes the literal pattern through -- letting awk open it directly
     # turns that into a fatal error on every poll (#2028). Read each file only
     # if it exists, and let awk do the summing: bash's own $((...)) throws a
-    # syntax error (killing the whole script, not just this calculation) on
-    # anything that isn't a plain integer, whereas awk coerces malformed sysfs
-    # content to 0 instead of dying on it.
+    # "syntax error" and prints a diagnostic to stderr on every poll for
+    # anything that isn't a plain integer (this script has no `set -e`, so it
+    # doesn't abort the run, just adds noise) -- awk parses a decimal like the
+    # sysfs values here fine, and only falls back to 0 for genuinely
+    # non-numeric content, either way without dying on it.
     local cpu_sysfs_dir="${GPUINFO_CPU_SYSFS_DIR:-/sys/devices/system/cpu}"
     local freq clock_freqs=()
     for file in "$cpu_sysfs_dir"/cpufreq/policy*/scaling_cur_freq; do
@@ -254,8 +256,9 @@ general_query() {
     ((${#clock_freqs[@]} > 0)) &&
         current_clock_speed=$(printf '%s\n' "${clock_freqs[@]}" | awk '{sum += $1; n++} END {if (n > 0) print sum / n / 1000 ""}')
     max_clock_speed=""
+    local max_freq_file max_freq_raw
     max_freq_file="$cpu_sysfs_dir/cpu0/cpufreq/cpuinfo_max_freq"
-    if [[ -f $max_freq_file ]]; then
+    if [[ -f "$max_freq_file" ]]; then
         max_freq_raw=$(cat "$max_freq_file" 2>/dev/null)
         [[ -n $max_freq_raw ]] && max_clock_speed=$(awk -v v="$max_freq_raw" 'BEGIN {print v/1000}')
     fi
