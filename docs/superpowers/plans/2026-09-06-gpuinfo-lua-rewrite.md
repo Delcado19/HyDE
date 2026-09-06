@@ -351,7 +351,15 @@ local function lookup_pci_name(lspci_cmd, addr)
     end
     -- "00:02.0 VGA compatible controller [0300]: Intel Corporation Iris Xe Graphics [8086:9a49] (rev 01)"
     -- -> "Iris Xe Graphics" (drop the vendor prefix, the [ids] suffix, the (rev) suffix).
-    local rest = line:match(":%s*(.+)$")
+    -- Anchored on "]:" (the class-id's closing bracket), not a bare ":" --
+    -- the PCI slot itself ("00:02.0") contains a colon earlier in the line,
+    -- and Lua patterns search from the first position that matches, so a
+    -- bare ":" anchor grabs everything after the *slot's* colon instead
+    -- (verified empirically while writing this plan: a bare ":" pattern
+    -- against the example line above returns "02.0 VGA compatible
+    -- controller [0300]: Intel Corporation Iris Xe Graphics ..." --  the
+    -- slot number leaking into the name -- not the intended match).
+    local rest = line:match("%]:%s*(.+)$")
     if not rest then
         return nil
     end
@@ -1911,9 +1919,13 @@ function M.cli_main(argv, opts)
     end
 
     if args.toggle then
-        local next_vendor = M.toggle(state, nil)
+        local next_vendor, err = M.toggle(state, nil)
+        if not next_vendor then
+            print_fn("Error: " .. err)
+            return 1
+        end
         M.write_state(suffix, state)
-        print_fn("Sensor: " .. tostring(next_vendor) .. " GPU")
+        print_fn("Sensor: " .. next_vendor .. " GPU")
         return 0
     end
 
