@@ -331,4 +331,68 @@ function M.read_cpu_clock_speed(cpu_sysfs_dir)
     return current_mhz, max_mhz
 end
 
+-- Checked in this order for every chip in the sensors -j output: GPU
+-- readings before CPU proxies (see spec: "Explicit behavior change").
+local TEMPERATURE_LABEL_PRIORITY = {"edge", "junction", "Tctl", "Tdie", "Package id"}
+
+--- Parses `sensors -j` output (passed in as `sensors_json`, so this stays
+--- testable without shelling out itself -- Task 11 wires the real
+--- `io.popen("sensors -j 2>/dev/null")` call) into (temperature, fan_speed).
+--- Malformed/empty input degrades to (nil, nil) rather than raising, since
+--- this runs on every single poll.
+function M.read_sensors(sensors_json)
+    if not sensors_json or sensors_json == "" then
+        return nil, nil
+    end
+    local ok, data = pcall(json.decode, sensors_json)
+    if not ok or type(data) ~= "table" then
+        return nil, nil
+    end
+
+    local temperature
+    for _, wanted_label in ipairs(TEMPERATURE_LABEL_PRIORITY) do
+        for _, chip in pairs(data) do
+            if type(chip) == "table" then
+                for label, entry in pairs(chip) do
+                    if type(entry) == "table" and label:find(wanted_label, 1, true) then
+                        for key, value in pairs(entry) do
+                            if key:match("^temp%d+_input$") and type(value) == "number" then
+                                temperature = math.floor(value)
+                                break
+                            end
+                        end
+                    end
+                    if temperature then
+                        break
+                    end
+                end
+            end
+            if temperature then
+                break
+            end
+        end
+        if temperature then
+            break
+        end
+    end
+
+    local fan_speed
+    for _, chip in pairs(data) do
+        if type(chip) == "table" and not fan_speed then
+            for label, entry in pairs(chip) do
+                if type(entry) == "table" and label:match("^fan%d") then
+                    for key, value in pairs(entry) do
+                        if key:match("^fan%d+_input$") and type(value) == "number" then
+                            fan_speed = math.floor(value)
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return temperature, fan_speed
+end
+
 return M
