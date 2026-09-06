@@ -33,7 +33,12 @@ jobs:
           # lua5.4 the same module via its default system rocks path instead.
           # --lua-version=5.4 alone isn't enough: Ubuntu's luarocks package
           # can't locate liblua5.4-dev's headers on its own ("Failed finding
-          # Lua header files"), so point it at them explicitly.
+          # Lua header files"), and pointing it at pkg-config's lua5.4
+          # variables didn't help either -- so find out what's actually on
+          # this runner instead of guessing again.
+          command -v pkg-config && pkg-config --exists lua5.4 && echo "pkg-config sees lua5.4" || echo "pkg-config lua5.4 lookup failed"
+          pkg-config --variable=includedir lua5.4 || true
+          dpkg -L liblua5.4-dev | grep -E '\.h$|pkgconfig'
           sudo luarocks --lua-version=5.4 install luafilesystem \
             LUA_INCDIR="$(pkg-config --variable=includedir lua5.4)" \
             LUA_LIBDIR="$(pkg-config --variable=libdir lua5.4)"
