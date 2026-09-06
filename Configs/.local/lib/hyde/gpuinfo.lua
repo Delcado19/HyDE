@@ -490,4 +490,56 @@ function M.generate_json(fields)
     })
 end
 
+--- NVIDIA vendor branch. Returns (fields, suspended). When `opts.is_nouveau`
+--- (the open-source driver, which nvidia-smi cannot query), falls back to
+--- the same generic sensors/proc-stat/cpufreq/battery reads every other
+--- "no dedicated vendor tool" path uses.
+function M.nvidia_query(opts)
+    local fields = {primary_gpu = "NVIDIA " .. opts.nvidia_gpu}
+
+    if opts.is_nouveau then
+        local temperature, fan_speed = M.read_sensors(opts.sensors_json or "")
+        fields.temperature = temperature
+        fields.fan_speed = fan_speed
+        fields.power_discharge = M.read_battery_discharge(opts.power_supply_dir or "/sys/class/power_supply")
+        local state = opts.state or {}
+        fields.utilization = M.read_cpu_utilization(state, opts.stat_file)
+        fields.current_clock_speed, fields.max_clock_speed = M.read_cpu_clock_speed(opts.cpu_sysfs_dir)
+        return fields, false
+    end
+
+    if opts.tired then
+        local runtime_status_path = opts.runtime_status_path
+            or ("/sys/bus/pci/devices/0000:" .. tostring(opts.nvidia_addr) .. "/power/runtime_status")
+        local status = read_first_line(runtime_status_path)
+        if status and status:find("suspend") then
+            return fields, true
+        end
+    end
+
+    local nvidia_smi_cmd = opts.nvidia_smi_cmd or "nvidia-smi"
+    local handle = io.popen(
+        nvidia_smi_cmd
+            .. " --query-gpu=temperature.gpu,utilization.gpu,clocks.current.graphics,clocks.max.graphics,power.draw,power.limit"
+            .. " --format=csv,noheader,nounits 2>/dev/null"
+    )
+    local line = handle and handle:read("*l")
+    if handle then
+        handle:close()
+    end
+    if line then
+        local values = {}
+        for value in line:gmatch("[^,]+") do
+            values[#values + 1] = value:gsub("^%s+", ""):gsub("%s+$", "")
+        end
+        fields.temperature = values[1]
+        fields.utilization = values[2]
+        fields.current_clock_speed = values[3]
+        fields.max_clock_speed = values[4]
+        fields.power_usage = values[5]
+        fields.power_limit = values[6]
+    end
+    return fields, false
+end
+
 return M
