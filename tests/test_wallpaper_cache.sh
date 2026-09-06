@@ -60,7 +60,26 @@ get_hashmap() {
     wallList=()
 }
 
-export WALLPAPER_CUSTOM_PATHS=("$custom_dir")
+# wallpaper_cache_commence picks between fn_wallcache and fn_wallcache_force
+# by building the name as a string ("fn_wallcache$mode") and handing it to
+# `parallel` to invoke per wallHash/wallList entry. `parallel` runs each job
+# through $SHELL by default -- zsh on a stock HyDE install -- which can't see
+# a bash function exported via `export -f`, so stubbing parallel itself
+# (which cache.sh calls as a bare command, letting a same-named shell
+# function shadow it) sidesteps that shell/subshell mismatch entirely and
+# looks only at which name it was asked to run.
+mode_calls_file="$work_dir/mode_calls"
+parallel() {
+    for arg in "$@"; do
+        case $arg in
+        fn_wallcache*) printf '%s\n' "$arg" >>"$mode_calls_file" ;;
+        esac
+    done
+}
+
+# Not exported: wallpaper_cache_commence and get_hashmap run in this same
+# shell, not a subprocess, so a plain array is all they need.
+WALLPAPER_CUSTOM_PATHS=("$custom_dir")
 
 # -w a single file: must scan only that file, not the custom collection.
 : >"$hashmap_calls_file"
@@ -102,9 +121,14 @@ esac
 # getopts allows repeating flags, so a caller can pass -w together with -t/-f
 # (whichever HyDE itself does or not, getopts does not reject it). The last
 # flag processed has to win for single_wallpaper the same way it already does
-# for cacheIn/mode -- otherwise "-w file -f" would keep single_wallpaper=1
-# from the earlier -w branch and skip the custom-path scan a real -f needs.
+# for cacheIn -- otherwise "-w file -f" would keep single_wallpaper=1 from the
+# earlier -w branch and skip the custom-path scan a real -f needs. mode has
+# the identical leak in the other direction: "-w file -f" must still force a
+# full rebuild (mode="_force"), and "-f -w file" must NOT (a plain -w request
+# forced into fn_wallcache_force is unnecessary reprocessing for what should
+# be the cheap single-file path).
 : >"$hashmap_calls_file"
+: >"$mode_calls_file"
 unset cacheIn mode wallHash wallList
 wallpaper_cache_commence -w "$single_wallpaper" -f >/dev/null 2>&1
 call=$(cat "$hashmap_calls_file")
@@ -112,10 +136,15 @@ case $call in
 *"$custom_dir"*) ;;
 *) fail "-w followed by -f did not fall back to a full scan (single_wallpaper leaked across flags): got '$call'" ;;
 esac
+case $(cat "$mode_calls_file") in
+fn_wallcache_force) ;;
+*) fail "-w followed by -f did not dispatch to fn_wallcache_force: got '$(cat "$mode_calls_file")'" ;;
+esac
 
 # And the reverse order: -f followed by -w must end up in single-file mode,
-# not have -f's custom-path scan stick around.
+# not have -f's custom-path scan or forced-rebuild mode stick around.
 : >"$hashmap_calls_file"
+: >"$mode_calls_file"
 unset cacheIn mode wallHash wallList
 wallpaper_cache_commence -f -w "$single_wallpaper" >/dev/null 2>&1
 call=$(cat "$hashmap_calls_file")
@@ -123,6 +152,29 @@ case $call in
 *"$custom_dir"*)
     fail "-f followed by -w still scanned the custom wallpaper collection: got '$call'"
     ;;
+esac
+case $(cat "$mode_calls_file") in
+fn_wallcache) ;;
+*) fail "-f followed by -w still forced a rebuild (mode leaked across flags): got '$(cat "$mode_calls_file")'" ;;
+esac
+
+# The same "last flag wins" rule applies between -f and -t: -t's own branch
+# has to clear a force mode set by an earlier -f the same way -w's does,
+# and a -f coming after -t must still force.
+: >"$mode_calls_file"
+unset cacheIn mode wallHash wallList
+wallpaper_cache_commence -f -t "$(basename "$theme_dir")" >/dev/null 2>&1
+case $(cat "$mode_calls_file") in
+fn_wallcache) ;;
+*) fail "-f followed by -t still forced a rebuild (mode leaked across flags): got '$(cat "$mode_calls_file")'" ;;
+esac
+
+: >"$mode_calls_file"
+unset cacheIn mode wallHash wallList
+wallpaper_cache_commence -t "$(basename "$theme_dir")" -f >/dev/null 2>&1
+case $(cat "$mode_calls_file") in
+fn_wallcache_force) ;;
+*) fail "-t followed by -f did not dispatch to fn_wallcache_force: got '$(cat "$mode_calls_file")'" ;;
 esac
 
 finish

@@ -123,6 +123,7 @@ wallpaper_cache_commence() {
             fi
             cacheIn="$OPTARG"
             single_wallpaper=1
+            mode=""
             ;;
         t)
             cacheIn="$(dirname "$HYDE_THEME_DIR")/$OPTARG"
@@ -131,6 +132,7 @@ wallpaper_cache_commence() {
                 return 1
             fi
             single_wallpaper=0
+            mode=""
             ;;
         f)
             cacheIn="$(dirname "$HYDE_THEME_DIR")"
