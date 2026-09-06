@@ -193,4 +193,51 @@ function M.detect_vendor(opts)
     return result
 end
 
+local VENDOR_ORDER = {"nvidia", "amd", "intel"}
+
+--- Cycles (or jumps to, if `requested` is set) the enabled GPU vendor,
+--- mutating `state` in place. Returns the new vendor name, or (nil, err) if
+--- `requested` names a vendor that isn't actually available.
+function M.toggle(state, requested)
+    local available = {}
+    for _, vendor in ipairs(VENDOR_ORDER) do
+        if state[vendor .. "_enable"] ~= nil then
+            available[#available + 1] = vendor
+        end
+    end
+    if #available == 0 then
+        return nil, "no GPU vendor is available"
+    end
+
+    local next_vendor
+    if requested then
+        local found = false
+        for _, vendor in ipairs(available) do
+            if vendor == requested then
+                found = true
+                break
+            end
+        end
+        if not found then
+            return nil, requested .. " not found in available vendors"
+        end
+        next_vendor = requested
+    else
+        local current_index = 1
+        for i, vendor in ipairs(available) do
+            if vendor == state.priority then
+                current_index = i
+                break
+            end
+        end
+        next_vendor = available[(current_index % #available) + 1]
+    end
+
+    for _, vendor in ipairs(available) do
+        state[vendor .. "_enable"] = (vendor == next_vendor)
+    end
+    state.priority = next_vendor
+    return next_vendor
+end
+
 return M
