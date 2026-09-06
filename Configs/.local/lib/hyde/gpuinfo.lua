@@ -302,4 +302,33 @@ function M.read_cpu_utilization(state, stat_file)
     return tonumber(string.format("%.1f", pct))
 end
 
+--- Reads current (averaged across policies) and max CPU clock speed in MHz
+--- from cpufreq sysfs, pure Lua -- no awk, and guarded existence checks
+--- throughout so a host with no cpufreq scaling driver (virtualized/cloud
+--- CPUs, some ARM boards, CI runners) reads as (nil, nil) instead of crashing.
+function M.read_cpu_clock_speed(cpu_sysfs_dir)
+    cpu_sysfs_dir = cpu_sysfs_dir or "/sys/devices/system/cpu"
+    local sum, count = 0, 0
+    local cpufreq_dir = cpu_sysfs_dir .. "/cpufreq"
+    if lfs.attributes(cpufreq_dir, "mode") == "directory" then
+        for entry in lfs.dir(cpufreq_dir) do
+            if entry:match("^policy") then
+                local raw = read_first_line(cpufreq_dir .. "/" .. entry .. "/scaling_cur_freq")
+                local khz = raw and tonumber(raw)
+                if khz then
+                    sum = sum + khz
+                    count = count + 1
+                end
+            end
+        end
+    end
+    local current_mhz = count > 0 and (sum / count / 1000) or nil
+
+    local max_raw = read_first_line(cpu_sysfs_dir .. "/cpu0/cpufreq/cpuinfo_max_freq")
+    local max_khz = max_raw and tonumber(max_raw)
+    local max_mhz = max_khz and (max_khz / 1000) or nil
+
+    return current_mhz, max_mhz
+end
+
 return M
