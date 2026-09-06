@@ -240,4 +240,33 @@ function M.toggle(state, requested)
     return next_vendor
 end
 
+--- Reads battery discharge power in watts from /sys/class/power_supply
+--- (or `power_supply_dir` in tests), pure Lua -- no awk. Prefers power_now
+--- (microwatts); falls back to current_now*voltage_now (microamps *
+--- microvolts) when power_now is missing or unreadable/empty, since some
+--- laptops' embedded controller answers ENXIO for power_now specifically.
+function M.read_battery_discharge(power_supply_dir)
+    if lfs.attributes(power_supply_dir, "mode") ~= "directory" then
+        return nil
+    end
+    for entry in lfs.dir(power_supply_dir) do
+        if entry:match("^BAT") then
+            local bat_dir = power_supply_dir .. "/" .. entry
+            local power_raw = read_first_line(bat_dir .. "/power_now")
+            local power_now = power_raw and tonumber(power_raw)
+            if power_now then
+                return power_now * 1e-6
+            end
+            local current_raw = read_first_line(bat_dir .. "/current_now")
+            local voltage_raw = read_first_line(bat_dir .. "/voltage_now")
+            local current_now = current_raw and tonumber(current_raw)
+            local voltage_now = voltage_raw and tonumber(voltage_raw)
+            if current_now and voltage_now then
+                return (current_now * voltage_now) / 1e12
+            end
+        end
+    end
+    return nil
+end
+
 return M
