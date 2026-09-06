@@ -24,9 +24,14 @@ jobs:
       - name: Install test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends lua5.4 shellcheck fish
+          sudo apt-get install -y --no-install-recommends lua5.4 liblua5.4-dev luarocks shellcheck fish
           sudo ln -sf /usr/bin/lua5.4 /usr/local/bin/lua
           sudo ln -sf /usr/bin/luac5.4 /usr/local/bin/luac
+          # gpuinfo.lua (and several other shipped scripts) require "lfs" at
+          # load time. On a real install this comes from hyde-shell luainit's
+          # own luarocks-managed tree; CI has no such tree, so give plain
+          # lua5.4 the same module via its default system rocks path instead.
+          sudo luarocks install luafilesystem
 
       - name: Report tool versions
         run: |
@@ -53,9 +58,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            lua5.4 shellcheck fish \
+            lua5.4 liblua5.4-dev luarocks shellcheck fish \
             binutils-dev build-essential cmake ninja-build libssl-dev \
             libcurl4-openssl-dev libelf-dev zlib1g-dev libdw-dev libiberty-dev
+          sudo luarocks install luafilesystem
           sudo ln -sf /usr/bin/lua5.4 /usr/local/bin/lua
           sudo ln -sf /usr/bin/luac5.4 /usr/local/bin/luac
 
