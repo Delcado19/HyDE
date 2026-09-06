@@ -61,4 +61,59 @@ local nouveau_fields = gpuinfo.nvidia_query({
 })
 check(nouveau_fields.primary_gpu == "NVIDIA Linux", "nouveau path did not set primary_gpu")
 
+-- The same --tired check, but exercising the *default* runtime_status path
+-- construction rather than the full runtime_status_path override above -- the
+-- override masked a double "0000:" domain prefix that made the real path never
+-- exist, so suspend was never detected on actual hardware. detect_vendor
+-- stores nvidia_addr straight from the sysfs directory entry name, which is
+-- already domain-qualified, so that is what is passed here.
+local pci_devices_dir = work_dir .. "/pci-devices"
+os.execute("mkdir -p '" .. pci_devices_dir .. "/0000:01:00.0/power'")
+write_file(pci_devices_dir .. "/0000:01:00.0/power/runtime_status", "suspended\n")
+local _, default_path_suspended = gpuinfo.nvidia_query({
+    nvidia_gpu = "GeForce RTX 4070",
+    tired = true,
+    nvidia_addr = "0000:01:00.0",
+    pci_devices_dir = pci_devices_dir,
+    nvidia_smi_cmd = fake_bin .. "/nonexistent-should-not-be-called",
+})
+check(default_path_suspended == true, "suspend was not detected via the default runtime_status path construction")
+
+-- Out-of-spec: an active GPU, and a missing/unreadable runtime_status file,
+-- both have to fall through to the normal query rather than reporting suspend.
+write_file(pci_devices_dir .. "/0000:01:00.0/power/runtime_status", "active\n")
+local active_fields, active_suspended = gpuinfo.nvidia_query({
+    nvidia_gpu = "GeForce RTX 4070",
+    tired = true,
+    nvidia_addr = "0000:01:00.0",
+    pci_devices_dir = pci_devices_dir,
+    nvidia_smi_cmd = fake_bin .. "/nvidia-smi",
+})
+check(active_suspended == false, "an active GPU was reported as suspended")
+check(active_fields.temperature == "62", "an active GPU with --tired did not fall through to nvidia-smi")
+
+local _, missing_suspended = gpuinfo.nvidia_query({
+    nvidia_gpu = "GeForce RTX 4070",
+    tired = true,
+    nvidia_addr = "0000:99:00.0",
+    pci_devices_dir = pci_devices_dir,
+    nvidia_smi_cmd = fake_bin .. "/nvidia-smi",
+})
+check(missing_suspended == false, "a missing runtime_status file was treated as suspended")
+
+-- Out-of-spec: no nvidia_addr at all (a state file written before the addr was
+-- recorded) must not crash on a nil concatenation.
+local nil_addr_ok = pcall(gpuinfo.nvidia_query, {
+    nvidia_gpu = "GeForce RTX 4070",
+    tired = true,
+    pci_devices_dir = pci_devices_dir,
+    nvidia_smi_cmd = fake_bin .. "/nvidia-smi",
+})
+check(nil_addr_ok, "a nil nvidia_addr raised instead of degrading to 'not suspended'")
+
+-- Out-of-spec: a nil GPU name (a phantom vendor selected from a state file
+-- that never recorded one) must not raise on the primary_gpu concatenation.
+local nil_name_ok = pcall(gpuinfo.nvidia_query, {nvidia_smi_cmd = fake_bin .. "/nvidia-smi"})
+check(nil_name_ok, "a nil nvidia_gpu name raised on the primary_gpu concatenation")
+
 os.exit(failures == 0 and 0 or 1)

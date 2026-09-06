@@ -63,4 +63,31 @@ local ok5, decoded5 = pcall(json.decode, huge)
 check(ok5, "an absurdly high temperature broke JSON generation")
 check(decoded5.percentage == 100, "an absurd temperature was not clamped to 100%%: got " .. tostring(decoded5.percentage))
 
+-- Out-of-spec: nvidia-smi answers the literal string "[N/A]" for query fields
+-- a card does not support, and nvidia_query passes raw CSV values straight
+-- through. math.floor("[N/A]") raises, which would take the whole waybar
+-- module's JSON line down -- these have to read as "no reading" instead.
+local na_ok, na = pcall(gpuinfo.generate_json, {
+    primary_gpu = "NVIDIA GeForce",
+    temperature = "[N/A]",
+    utilization = "[N/A]",
+})
+check(na_ok, "a non-numeric nvidia-smi reading raised instead of degrading: " .. tostring(na))
+local ok6, decoded6 = pcall(json.decode, na_ok and na or "")
+check(ok6, "a non-numeric nvidia-smi reading did not produce valid JSON")
+check(ok6 and decoded6.percentage == 0, "a non-numeric temperature did not fall back to 0%%: got " .. tostring(ok6 and decoded6.percentage))
+check(ok6 and decoded6.class[2] == "util-0", "a non-numeric utilization did not fall back to the util-0 bucket: got " .. tostring(ok6 and decoded6.class[2]))
+
+-- A numeric *string* (the normal nvidia-smi case) must keep working unchanged.
+local str_ok, str_json = pcall(gpuinfo.generate_json, {primary_gpu = "x", temperature = "62", utilization = "45"})
+local ok7, decoded7 = pcall(json.decode, str_ok and str_json or "")
+check(ok7 and decoded7.percentage == 62, "a numeric-string temperature stopped being read: got " .. tostring(ok7 and decoded7.percentage))
+
+-- A zero discharge reading (on AC power) is not a discharge -- it must not add
+-- a "Power Discharge: 0.0 W" tooltip line. read_battery_discharge returns a
+-- float, so this is "0.0", which a string comparison against "0" let through.
+local ac = gpuinfo.generate_json({primary_gpu = "x", temperature = 50, power_discharge = 0.0})
+local ok8, decoded8 = pcall(json.decode, ac)
+check(ok8 and not decoded8.tooltip:find("Power Discharge"), "a zero discharge reading still produced a Power Discharge tooltip line")
+
 os.exit(failures == 0 and 0 or 1)

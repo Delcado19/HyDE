@@ -12,6 +12,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Docs: link to Lua migration guide in `README.md` and `MIGRATION-LUA.md`
 - Waybar: add VSCodium and Chromium icon rules to window module
 
+### Changed
+- Waybar: `gpuinfo` is now `gpuinfo.lua`, a Lua rewrite of `gpuinfo.sh` — far fewer subprocess calls per poll and parsing that is maintainable instead of a `lspci | grep | awk | sed` pipeline
+- Waybar: `gpuinfo` temperature sensor matching now follows an explicit priority order (GPU readings win over CPU-proxy readings) rather than whatever order `sensors` happened to print
+- Waybar: `gpuinfo` state now lives in `${XDG_RUNTIME_DIR:-/tmp}/hyde-$UID-gpuinfo<suffix>.json`
+
 ### Fixed
 - Waybar, wlogout: fix logout button behavior
 - Waybar: resolve visual collision between privacy and tray modules by adding margins

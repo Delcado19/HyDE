@@ -14,9 +14,28 @@ end
 local work_dir = os.getenv("GPUINFO_TEST_WORK_DIR")
 assert(work_dir, "GPUINFO_TEST_WORK_DIR must be set by the test wrapper")
 
+-- Every run() points detection at paths that cannot exist, so no case in this
+-- file ever reads the real machine's /sys/bus/pci/devices or shells out to the
+-- real lspci -- otherwise the assertions below would pass or fail depending on
+-- what GPU the CI runner happens to have.
+local FAKE_DETECT = {
+    pci_dir = work_dir .. "/no-such-pci-dir",
+    modules_file = work_dir .. "/no-such-modules",
+    path_dirs = {work_dir .. "/no-such-bin-dir"},
+}
+
 local function run(argv, extra_opts)
     local lines = {}
-    local opts = {print_fn = function(s) lines[#lines + 1] = s end}
+    local opts = {
+        print_fn = function(s) lines[#lines + 1] = s end,
+        state_suffix_override = "_cli_test",
+        detect_vendor_opts = FAKE_DETECT,
+        -- Same reason: no `sensors` subprocess, no real sysfs reads.
+        sensors_json = "",
+        stat_file = work_dir .. "/no-such-stat-file",
+        cpu_sysfs_dir = work_dir .. "/no-such-cpufreq-dir",
+        power_supply_dir = work_dir .. "/no-such-power-dir",
+    }
     for k, v in pairs(extra_opts or {}) do
         opts[k] = v
     end
@@ -35,8 +54,6 @@ end
 os.remove(gpuinfo.state_path("_cli_test"))
 local warn_lines = {}
 local code1, out1 = run({"--use", "nonexistent-vendor-suffix-for-isolation"}, {
-    state_suffix_override = "_cli_test",
-    detect_vendor_opts = {pci_dir = work_dir .. "/no-such-pci-dir", modules_file = work_dir .. "/no-such-modules"},
     warn_fn = function(s) warn_lines[#warn_lines + 1] = s end,
 })
 check(#warn_lines > 0, "the cold-start 'Initialized: ...' diagnostic did not go through warn_fn at all")
@@ -48,14 +65,43 @@ end
 -- --stat <vendor> reports "GPU not enabled." and a nonzero exit for a vendor
 -- that was never detected -- matches the bash version's contract exactly
 -- (waybar's exec-if uses this to decide whether to show that module at all).
-local code2, out2 = run({"--stat", "nvidia"}, {state_suffix_override = "_cli_test"})
+local code2, out2 = run({"--stat", "nvidia"})
 check(code2 ~= 0, "--stat for an undetected vendor did not exit non-zero")
 check(out2:find("GPU not enabled%."), "--stat for an undetected vendor did not print the documented message")
 
 -- --stat with an invalid vendor name reports the documented usage error.
-local code3, out3 = run({"--stat", "bogus"}, {state_suffix_override = "_cli_test"})
+local code3, out3 = run({"--stat", "bogus"})
 check(code3 ~= 0, "--stat with an invalid vendor name did not exit non-zero")
 check(out3:find("Invalid argument for %-%-stat"), "--stat with an invalid vendor name did not print the documented error")
+
+-- Detection must run once and stay run, even when it finds nothing: on
+-- hardware with none of the three recognized vendors every *_enable stays
+-- false forever, and a "did we find anything" gate re-walked sysfs and
+-- re-emitted the "Initialized: ..." diagnostic on every single poll (~5s
+-- forever), defeating the rewrite's whole fewer-subprocess-calls point.
+os.remove(gpuinfo.state_path("_cli_test"))
+local first_warns, second_warns = {}, {}
+run({}, {warn_fn = function(s) first_warns[#first_warns + 1] = s end})
+run({}, {warn_fn = function(s) second_warns[#second_warns + 1] = s end})
+check(#first_warns > 0, "the first poll on a machine with no supported GPU did not run detection at all")
+check(#second_warns == 0, "detection re-ran on the second poll even though it had already run: " .. table.concat(second_warns, " | "))
+
+-- --reset clears stale flags, matching the bash version's `rm -fr` of the
+-- state file that its own --help still advertises -- but a flag passed on the
+-- same invocation as --reset must survive it.
+run({"--tired", "--emoji"})
+local after_tired = gpuinfo.read_state("_cli_test")
+check(after_tired.tired == true and after_tired.emoji == true, "--tired/--emoji were not persisted")
+
+run({"--reset"})
+local after_reset = gpuinfo.read_state("_cli_test")
+check(not after_reset.tired, "--reset did not clear a stale tired flag")
+check(not after_reset.emoji, "--reset did not clear a stale emoji flag")
+check(after_reset.detected == true, "--reset did not re-run detection")
+
+run({"--reset", "--tired"})
+local reset_with_flag = gpuinfo.read_state("_cli_test")
+check(reset_with_flag.tired == true, "--reset wiped a --tired flag passed on the same invocation")
 
 os.remove(gpuinfo.state_path("_cli_test"))
 

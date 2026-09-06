@@ -4,6 +4,7 @@ package.path = package.path .. ";" .. root .. "?.lua;" .. root .. "?/init.lua;"
 require("luautils.init")
 
 local json = require("luautils.json")
+local lfs = require("lfs")
 
 local M = {}
 
@@ -13,7 +14,12 @@ local M = {}
 --- each other's toggle/priority state).
 function M.state_path(suffix)
     local runtime_dir = os.getenv("XDG_RUNTIME_DIR") or "/tmp"
-    return runtime_dir .. "/hyde-" .. (os.getenv("UID") or tostring(0)) .. "-gpuinfo" .. (suffix or "") .. ".json"
+    -- UID is a bash shell variable, never exported, so os.getenv("UID") is
+    -- always nil here. Stat $HOME instead, so the /tmp fallback (used when
+    -- XDG_RUNTIME_DIR is unset -- when it is set it is already per-user)
+    -- stays scoped per user rather than colliding on /tmp/hyde-0-gpuinfo.json.
+    local uid = lfs.attributes(os.getenv("HOME") or "/", "uid") or 0
+    return runtime_dir .. "/hyde-" .. tostring(uid) .. "-gpuinfo" .. (suffix or "") .. ".json"
 end
 
 --- Reads the state for `suffix`. Always returns a table -- a missing or
@@ -51,8 +57,6 @@ function M.write_state(suffix, state)
     end
     return true
 end
-
-local lfs = require("lfs")
 
 local PCI_VENDOR_IDS = {["0x10de"] = "nvidia", ["0x1002"] = "amd", ["0x8086"] = "intel"}
 
@@ -176,12 +180,10 @@ function M.detect_vendor(opts)
     end
 
     -- nvidia-smi presence: PATH search instead of `command -v nvidia-smi`.
-    if not result.nvidia_smi_present then
-        for _, dir in ipairs(path_dirs) do
-            if lfs.attributes(dir .. "/nvidia-smi", "mode") == "file" then
-                result.nvidia_smi_present = true
-                break
-            end
+    for _, dir in ipairs(path_dirs) do
+        if lfs.attributes(dir .. "/nvidia-smi", "mode") == "file" then
+            result.nvidia_smi_present = true
+            break
         end
     end
 
@@ -198,10 +200,41 @@ local VENDOR_ORDER = {"nvidia", "amd", "intel"}
 --- Cycles (or jumps to, if `requested` is set) the enabled GPU vendor,
 --- mutating `state` in place. Returns the new vendor name, or (nil, err) if
 --- `requested` names a vendor that isn't actually available.
+---
+--- Availability comes from `state.available`, the list detection records once
+--- (the port of the bash version's GPUINFO_AVAILABLE). It deliberately does
+--- not come from the `*_enable` keys, in either direction:
+---   * `state[v .. "_enable"] ~= nil` (presence) is wrong because cli_main
+---     writes all three keys on every detection, explicit `false` included --
+---     so every vendor looked available on every machine, one --toggle could
+---     select a vendor that was never detected, and every later poll then
+---     crashed on its never-populated `*_gpu` name (blank module until
+---     --reset).
+---   * truthiness alone is wrong because `*_enable` records which vendor is
+---     *selected*, and the loop at the bottom of this function sets the others
+---     to false -- so after one toggle there would be nothing left to cycle to
+---     and --toggle would become a no-op. (Bash avoided this by *commenting
+---     out* the losing GPUINFO_*_ENABLE=1 lines, keeping them greppable.)
+--- A state with no recorded availability (hand-edited, or a direct API caller)
+--- degrades to "whatever is currently enabled".
 function M.toggle(state, requested)
+    local recorded
+    if type(state.available) == "table" and #state.available > 0 then
+        recorded = {}
+        for _, name in ipairs(state.available) do
+            recorded[name] = true
+        end
+    end
+
     local available = {}
     for _, vendor in ipairs(VENDOR_ORDER) do
-        if state[vendor .. "_enable"] ~= nil then
+        local is_available
+        if recorded then
+            is_available = recorded[vendor]
+        else
+            is_available = state[vendor .. "_enable"]
+        end
+        if is_available then
             available[#available + 1] = vendor
         end
     end
@@ -277,11 +310,21 @@ end
 --- already fixed for the bash version.
 function M.read_cpu_utilization(state, stat_file)
     stat_file = stat_file or "/proc/stat"
-    local f = assert(io.open(stat_file, "r"), "could not open " .. stat_file)
+    -- Degrades like every sibling reader here: a missing or malformed stat
+    -- file reads as 0%, it never raises. This runs on every poll, and a raise
+    -- would take the whole waybar module's JSON line down with it.
+    local f = io.open(stat_file, "r")
+    if not f then
+        return 0
+    end
     local line = f:read("*l")
     f:close()
-    local user, nice, system, idle, iowait, irq, softirq =
-        line:match("^cpu%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)")
+    local user, nice, system, idle, iowait, irq, softirq = (line or ""):match(
+        "^cpu%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)"
+    )
+    if not softirq then
+        return 0
+    end
     local curr_stat = tonumber(user) + tonumber(nice) + tonumber(system)
         + tonumber(irq) + tonumber(softirq) + tonumber(iowait)
     local curr_idle = tonumber(idle)
@@ -380,7 +423,10 @@ function M.read_sensors(sensors_json)
     for _, chip in pairs(data) do
         if type(chip) == "table" and not fan_speed then
             for label, entry in pairs(chip) do
-                if type(entry) == "table" and label:match("^fan%d") then
+                -- Stop at the first match: without this the loop keeps walking
+                -- a chip's remaining labels and the reported speed for a
+                -- multi-fan chip depends on pairs() iteration order.
+                if not fan_speed and type(entry) == "table" and label:match("^fan%d") then
                     for key, value in pairs(entry) do
                         if key:match("^fan%d+_input$") and type(value) == "number" then
                             fan_speed = math.floor(value)
@@ -444,12 +490,18 @@ function M.generate_json(fields)
     local speedo_icon = M.map_floor(util_lv, fields.utilization or 0)
     local thermo_icon = M.map_floor(temp_lv, fields.temperature or -999)
 
-    local temp_val = fields.temperature and math.floor(fields.temperature) or nil
+    -- tonumber first: nvidia-smi answers "[N/A]" for query fields a card does
+    -- not support, and nvidia_query passes raw CSV strings straight through.
+    -- math.floor("[N/A]") raises, which would break the "always valid JSON"
+    -- contract waybar's return-type:json depends on.
+    local temp_num = tonumber(fields.temperature)
+    local temp_val = temp_num and math.floor(temp_num) or nil
     local temp_clamped = temp_val and clamp(temp_val, 0, 999) or 0
     local temp_bucket = clamp(math.floor(temp_clamped / 5) * 5, 0, 100)
     local temp_class = "temp-" .. temp_bucket
 
-    local util_val = fields.utilization and math.floor(fields.utilization) or 0
+    local util_num = tonumber(fields.utilization)
+    local util_val = util_num and math.floor(util_num) or 0
     util_val = clamp(util_val, 0, 100)
     local util_bucket = math.floor(util_val / 10) * 10
     local util_class = "util-" .. util_bucket
@@ -474,7 +526,10 @@ function M.generate_json(fields)
             tooltip = tooltip .. "\n󱪉 Power Usage: " .. fields.power_usage .. " W"
         end
     end
-    if fields.power_discharge and tostring(fields.power_discharge) ~= "0" then
+    -- Numeric compare: read_battery_discharge returns a float, so a zero
+    -- reading on AC power stringifies as "0.0" and slipped past a string
+    -- comparison against "0", printing a bogus "Power Discharge: 0.0 W" line.
+    if fields.power_discharge and tonumber(fields.power_discharge) ~= 0 then
         tooltip = tooltip .. "\n Power Discharge: " .. fields.power_discharge .. " W"
     end
     if fields.fan_speed then
@@ -495,7 +550,7 @@ end
 --- the same generic sensors/proc-stat/cpufreq/battery reads every other
 --- "no dedicated vendor tool" path uses.
 function M.nvidia_query(opts)
-    local fields = {primary_gpu = "NVIDIA " .. opts.nvidia_gpu}
+    local fields = {primary_gpu = "NVIDIA " .. tostring(opts.nvidia_gpu)}
 
     if opts.is_nouveau then
         local temperature, fan_speed = M.read_sensors(opts.sensors_json or "")
@@ -509,8 +564,13 @@ function M.nvidia_query(opts)
     end
 
     if opts.tired then
+        -- detect_vendor stores nvidia_addr straight from the
+        -- /sys/bus/pci/devices directory entry name, which is already
+        -- domain-qualified ("0000:01:00.0") -- prefixing another "0000:" here
+        -- built a path that never exists, so suspend was never detected and
+        -- --tired silently woke the GPU on every poll anyway.
         local runtime_status_path = opts.runtime_status_path
-            or ("/sys/bus/pci/devices/0000:" .. tostring(opts.nvidia_addr) .. "/power/runtime_status")
+            or ((opts.pci_devices_dir or "/sys/bus/pci/devices") .. "/" .. tostring(opts.nvidia_addr) .. "/power/runtime_status")
         local status = read_first_line(runtime_status_path)
         if status and status:find("suspend") then
             return fields, true
@@ -550,14 +610,18 @@ end
 --- error strings, which the bash version's two-literal-substring check did
 --- not (it would have tried to jq-parse those as JSON).
 function M.amd_query(opts)
-    local fields = {primary_gpu = "AMD " .. opts.amdgpu_gpu}
+    local fields = {primary_gpu = "AMD " .. tostring(opts.amdgpu_gpu)}
 
     local ok, decoded = pcall(json.decode, opts.amdgpu_output or "")
     if ok and type(decoded) == "table" and decoded["GPU Temperature"] then
+        -- Each key guarded separately: a partial object (only some keys set)
+        -- must degrade to a missing field rather than index nil.
         fields.temperature = decoded["GPU Temperature"]:gsub("°C", "")
-        fields.utilization = decoded["GPU Load"]:gsub("%%", "")
-        fields.core_clock = decoded["GPU Core Clock"]:gsub(" GHz", ""):gsub(" MHz", "")
-        fields.power_usage = decoded["GPU Power Usage"]:gsub(" Watts", "")
+        fields.utilization = decoded["GPU Load"] and decoded["GPU Load"]:gsub("%%", "") or nil
+        fields.core_clock = decoded["GPU Core Clock"]
+            and decoded["GPU Core Clock"]:gsub(" GHz", ""):gsub(" MHz", "")
+            or nil
+        fields.power_usage = decoded["GPU Power Usage"] and decoded["GPU Power Usage"]:gsub(" Watts", "") or nil
         return fields
     end
 
@@ -603,16 +667,21 @@ function M.cli_main(argv, opts)
     local suffix = opts.state_suffix_override or (args.startup and "" or (args.use and ("_" .. args.use) or ""))
     local state = M.read_state(suffix)
 
-    if args.tired then
-        state.tired = true
-    end
-    if args.emoji then
-        state.emoji = true
-    end
-
-    local has_any_vendor = state.nvidia_enable or state.amd_enable or state.intel_enable
-    if args.reset or not has_any_vendor then
+    -- Gated on "has detection ever run", not on "did it find anything": on
+    -- hardware with none of the three recognized vendors (a VM's virtio-gpu,
+    -- say) all three enables stay false forever, so the old
+    -- `not has_any_vendor` condition re-walked /sys/bus/pci/devices, rewrote
+    -- the state file and re-emitted the "Initialized:" warning on every poll.
+    if args.reset or not state.detected then
+        -- --reset starts from a genuinely empty state, matching the bash
+        -- version's `rm -fr` of the state file (its --help still advertises
+        -- that): stale tired/emoji flags from an earlier invocation must not
+        -- survive. Flags passed on *this* invocation are applied just below.
+        if args.reset then
+            state = {}
+        end
         local detected = M.detect_vendor(opts.detect_vendor_opts)
+        state.detected = true
         state.nvidia_enable = detected.nvidia
         state.amd_enable = detected.amd
         state.intel_enable = detected.intel
@@ -622,6 +691,15 @@ function M.cli_main(argv, opts)
         state.nvidia_addr = detected.nvidia_addr
         state.amd_addr = detected.amd_addr
         state.intel_addr = detected.intel_addr
+        -- The set of vendors --toggle/--use may switch between, recorded once
+        -- here because the *_enable keys below get overwritten with the
+        -- *selection* on every toggle (see M.toggle's note).
+        state.available = {}
+        for _, vendor in ipairs(VENDOR_ORDER) do
+            if detected[vendor] then
+                state.available[#state.available + 1] = vendor
+            end
+        end
         if detected.nvidia then
             state.priority = "nvidia"
         elseif detected.amd then
@@ -638,6 +716,13 @@ function M.cli_main(argv, opts)
                 .. " intel="
                 .. tostring(detected.intel)
         )
+    end
+
+    if args.tired then
+        state.tired = true
+    end
+    if args.emoji then
+        state.emoji = true
     end
 
     if args.toggle then
@@ -710,11 +795,18 @@ function M.cli_main(argv, opts)
         end
         fields = nvidia_fields
     elseif state.amd_enable then
+        -- HOME can be unset (some systemd unit contexts); don't concatenate nil.
         local python_bin = opts.python_bin
-            or ((os.getenv("XDG_STATE_HOME") or (os.getenv("HOME") .. "/.local/state")) .. "/hyde/python_env/bin/python")
+            or (
+                (os.getenv("XDG_STATE_HOME") or ((os.getenv("HOME") or "/root") .. "/.local/state"))
+                .. "/hyde/python_env/bin/python"
+            )
         local amdgpu_output = opts.amdgpu_output
         if not amdgpu_output then
-            local handle = io.popen(python_bin .. " " .. (opts.amdgpu_py_cmd or (root .. "amdgpu.py")) .. " 2>/dev/null")
+            -- Quoted: both paths are filesystem paths that may contain spaces.
+            local handle = io.popen(
+                "'" .. python_bin .. "' '" .. (opts.amdgpu_py_cmd or (root .. "amdgpu.py")) .. "' 2>/dev/null"
+            )
             amdgpu_output = handle and handle:read("*a") or ""
             if handle then
                 handle:close()
