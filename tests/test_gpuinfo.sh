@@ -152,6 +152,16 @@ for line in lines:
 ' >/dev/null 2>&1; then
     fail "a missing cpufreq sysfs tree produced a line on stdout that is not a JSON object: $cpufreq_stdout"
 fi
+# No fatal and valid JSON aren't the whole contract (#2028): a wrong but
+# well-formed clock-speed value would pass both those checks. The tooltip
+# only ever gets a "Clock Speed" segment when both current_clock_speed and
+# max_clock_speed are non-empty, so its absence here confirms the missing
+# tree actually left them empty rather than some other value slipping in.
+case $cpufreq_stdout in
+*"Clock Speed"*)
+    fail "a missing cpufreq sysfs tree still produced a Clock Speed field: $cpufreq_stdout"
+    ;;
+esac
 
 # Sanity check that the rewritten averaging loop still computes the right
 # number for well-formed, in-spec sysfs content, not just that it survives
