@@ -516,6 +516,16 @@ export BIN_DIR LIB_DIR SHARE_DIR PATH HYDE_SCRIPTS_PATH
 
 case "$1" in
 app)
+    # app launches a service/scope that outlives this shell via exec, so
+    # anything it needs from HyDE's generated config (e.g. config.toml ->
+    # env vars like BATTERY_NOTIFY_DOCK) has to be sourced and exported
+    # before the exec below -- this path used to skip globalcontrol.sh
+    # entirely and reach it only on the fallback branch further down,
+    # silently launching every app-managed service without it (#1951).
+    if ! source "${LIB_DIR}/hyde/globalcontrol.sh"; then
+        echo "Error: Could not load HyDE, broken installation?"
+        exit 1
+    fi
     export PATH="${HYDE_SCRIPTS_PATH}:${PATH}"
     [[ "${HYDEPY}" -eq 1 ]] && python_activate
     shift
