@@ -571,4 +571,188 @@ function M.amd_query(opts)
     return fields
 end
 
+local argparse = require("luautils.argparse")
+
+local VENDOR_STAT_KEY = {nvidia = "nvidia_enable", amd = "amd_enable", intel = "intel_enable"}
+
+--- CLI entry point. `opts` (all optional, used by tests to avoid touching
+--- the real machine): print_fn, state_suffix_override, detect_vendor_opts,
+--- sensors_cmd, nvidia_smi_cmd, amdgpu_py_cmd, python_bin, lspci_cmd,
+--- power_supply_dir, stat_file, cpu_sysfs_dir.
+function M.cli_main(argv, opts)
+    opts = opts or {}
+    local print_fn = opts.print_fn or print
+    -- Separate from print_fn on purpose: a cold start (no state file yet)
+    -- reaches both this diagnostic *and* the regular generate_json print
+    -- below in the same invocation. Waybar's return-type:json reads stdout
+    -- line by line, so mixing the two on one stream is exactly the
+    -- #2021/#2022 bug this rewrite must not reintroduce -- this always goes
+    -- to stderr, never through print_fn/stdout.
+    local warn_fn = opts.warn_fn or function(s) io.stderr:write(s, "\n") end
+
+    local parser = argparse("gpuinfo", "GPU/CPU info for the waybar custom/gpuinfo module")
+    parser:option("--use", "Only call the specified GPU"):argname("GPU")
+    parser:option("--stat", "Report whether GPU is enabled (amd, intel, nvidia)"):argname("GPU")
+    parser:flag("--toggle", "Toggle available GPU")
+    parser:flag("--reset", "Remove & restart all detection")
+    parser:flag("--tired", "Do not query nvidia-smi if the GPU is in suspend mode")
+    parser:flag("--emoji", "Use emoji instead of glyphs")
+    parser:flag("--startup", "Set this GPU at startup (used with --use)")
+    local args = parser:parse(argv)
+
+    local suffix = opts.state_suffix_override or (args.startup and "" or (args.use and ("_" .. args.use) or ""))
+    local state = M.read_state(suffix)
+
+    if args.tired then
+        state.tired = true
+    end
+    if args.emoji then
+        state.emoji = true
+    end
+
+    local has_any_vendor = state.nvidia_enable or state.amd_enable or state.intel_enable
+    if args.reset or not has_any_vendor then
+        local detected = M.detect_vendor(opts.detect_vendor_opts)
+        state.nvidia_enable = detected.nvidia
+        state.amd_enable = detected.amd
+        state.intel_enable = detected.intel
+        state.nvidia_gpu = detected.nvidia_gpu
+        state.amd_gpu = detected.amd_gpu
+        state.intel_gpu = detected.intel_gpu
+        state.nvidia_addr = detected.nvidia_addr
+        state.amd_addr = detected.amd_addr
+        state.intel_addr = detected.intel_addr
+        if detected.nvidia then
+            state.priority = "nvidia"
+        elseif detected.amd then
+            state.priority = "amd"
+        elseif detected.intel then
+            state.priority = "intel"
+        end
+        M.write_state(suffix, state)
+        warn_fn(
+            "Initialized: nvidia="
+                .. tostring(detected.nvidia)
+                .. " amd="
+                .. tostring(detected.amd)
+                .. " intel="
+                .. tostring(detected.intel)
+        )
+    end
+
+    if args.toggle then
+        local next_vendor, err = M.toggle(state, nil)
+        if not next_vendor then
+            print_fn("Error: " .. err)
+            return 1
+        end
+        M.write_state(suffix, state)
+        print_fn("Sensor: " .. next_vendor .. " GPU")
+        return 0
+    end
+
+    if args.use then
+        local next_vendor, err = M.toggle(state, args.use)
+        if not next_vendor then
+            print_fn("Error: " .. err)
+            M.write_state(suffix, state)
+            return 1
+        end
+        M.write_state(suffix, state)
+    end
+
+    if args.stat then
+        local key = VENDOR_STAT_KEY[args.stat]
+        if not key then
+            print_fn("Error: Invalid argument for --stat. Use amd, intel, or nvidia.")
+            return 1
+        end
+        if state[key] then
+            print_fn(key .. ": true")
+            return 0
+        end
+        print_fn("GPU not enabled.")
+        return 1
+    end
+
+    local common_opts = {
+        sensors_json = opts.sensors_json,
+        stat_file = opts.stat_file,
+        cpu_sysfs_dir = opts.cpu_sysfs_dir,
+        power_supply_dir = opts.power_supply_dir,
+        state = state,
+    }
+    if not opts.sensors_json then
+        local handle = io.popen((opts.sensors_cmd or "sensors") .. " -j 2>/dev/null")
+        common_opts.sensors_json = handle and handle:read("*a") or ""
+        if handle then
+            handle:close()
+        end
+    end
+
+    local fields
+    if state.nvidia_enable then
+        local nvidia_fields, suspended = M.nvidia_query({
+            nvidia_gpu = state.nvidia_gpu,
+            is_nouveau = state.nvidia_gpu == "Linux",
+            nvidia_addr = state.nvidia_addr,
+            tired = state.tired,
+            nvidia_smi_cmd = opts.nvidia_smi_cmd,
+            sensors_json = common_opts.sensors_json,
+            stat_file = common_opts.stat_file,
+            cpu_sysfs_dir = common_opts.cpu_sysfs_dir,
+            power_supply_dir = common_opts.power_supply_dir,
+            state = state,
+        })
+        if suspended then
+            print_fn(json.encode({text = "󰤂", tooltip = nvidia_fields.primary_gpu .. " ⏾ Suspended mode"}))
+            return 0
+        end
+        fields = nvidia_fields
+    elseif state.amd_enable then
+        local python_bin = opts.python_bin
+            or ((os.getenv("XDG_STATE_HOME") or (os.getenv("HOME") .. "/.local/state")) .. "/hyde/python_env/bin/python")
+        local amdgpu_output = opts.amdgpu_output
+        if not amdgpu_output then
+            local handle = io.popen(python_bin .. " " .. (opts.amdgpu_py_cmd or (root .. "amdgpu.py")) .. " 2>/dev/null")
+            amdgpu_output = handle and handle:read("*a") or ""
+            if handle then
+                handle:close()
+            end
+        end
+        fields = M.amd_query({
+            amdgpu_gpu = state.amd_gpu,
+            amdgpu_output = amdgpu_output,
+            sensors_json = common_opts.sensors_json,
+            stat_file = common_opts.stat_file,
+            cpu_sysfs_dir = common_opts.cpu_sysfs_dir,
+            power_supply_dir = common_opts.power_supply_dir,
+            state = state,
+        })
+    elseif state.intel_enable then
+        fields = {primary_gpu = "Intel " .. tostring(state.intel_gpu)}
+        fields.temperature, fields.fan_speed = M.read_sensors(common_opts.sensors_json)
+        fields.power_discharge = M.read_battery_discharge(common_opts.power_supply_dir or "/sys/class/power_supply")
+        fields.utilization = M.read_cpu_utilization(state, common_opts.stat_file)
+        fields.current_clock_speed, fields.max_clock_speed = M.read_cpu_clock_speed(common_opts.cpu_sysfs_dir)
+    else
+        fields = {primary_gpu = "Not found"}
+        fields.temperature, fields.fan_speed = M.read_sensors(common_opts.sensors_json)
+        fields.power_discharge = M.read_battery_discharge(common_opts.power_supply_dir or "/sys/class/power_supply")
+        fields.utilization = M.read_cpu_utilization(state, common_opts.stat_file)
+        fields.current_clock_speed, fields.max_clock_speed = M.read_cpu_clock_speed(common_opts.cpu_sysfs_dir)
+    end
+    fields.emoji = state.emoji
+
+    M.write_state(suffix, state)
+    print_fn(M.generate_json(fields))
+    return 0
+end
+
+local arg_count = #arg
+local vararg_count = select("#", ...)
+if arg_count == vararg_count and (vararg_count == 0 or select(1, ...) == arg[1]) then
+    os.exit(M.cli_main(arg))
+end
+
 return M
