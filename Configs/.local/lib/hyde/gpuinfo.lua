@@ -269,4 +269,37 @@ function M.read_battery_discharge(power_supply_dir)
     return nil
 end
 
+--- Reads current CPU utilization as a percentage, diffed against the
+--- previous poll's totals persisted in `state.prev_stat`/`state.prev_idle`.
+--- Seeds both to the current reading on the very first call (no prior state),
+--- which makes that first call report 0% instead of a division-by-zero or a
+--- nonsense diff against zero -- the same cold-start contract #2021/#2022
+--- already fixed for the bash version.
+function M.read_cpu_utilization(state, stat_file)
+    stat_file = stat_file or "/proc/stat"
+    local f = assert(io.open(stat_file, "r"), "could not open " .. stat_file)
+    local line = f:read("*l")
+    f:close()
+    local user, nice, system, idle, iowait, irq, softirq =
+        line:match("^cpu%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)")
+    local curr_stat = tonumber(user) + tonumber(nice) + tonumber(system)
+        + tonumber(irq) + tonumber(softirq) + tonumber(iowait)
+    local curr_idle = tonumber(idle)
+
+    local prev_stat = tonumber(state.prev_stat)
+    local prev_idle = tonumber(state.prev_idle)
+    if not prev_stat or not prev_idle then
+        prev_stat, prev_idle = curr_stat, curr_idle
+    end
+
+    local diff_stat = curr_stat - prev_stat
+    local diff_idle = curr_idle - prev_idle
+    state.prev_stat = curr_stat
+    state.prev_idle = curr_idle
+
+    local total = diff_stat + diff_idle
+    local pct = total > 0 and (diff_stat / total) * 100 or 0
+    return tonumber(string.format("%.1f", pct))
+end
+
 return M
