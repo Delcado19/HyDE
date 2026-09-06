@@ -186,11 +186,21 @@ function M.detect_vendor(opts)
         for line in modules_f:lines() do
             if line:match("^nouveau%s") then
                 nouveau_found = true
+                -- Display-name fallback only, when PCI detection couldn't
+                -- resolve one via lspci. Nouveau-ness itself is recorded
+                -- separately below -- comparing the name against this
+                -- placeholder would misidentify a real PCI-resolved name
+                -- as "not nouveau" even when nouveau is the only driver
+                -- present (caught in review: cli_main used to do exactly
+                -- that comparison, so a nouveau host that also happened to
+                -- have a resolvable lspci name took the nvidia-smi path
+                -- and got nothing back instead of the generic sensor path).
                 result.nvidia_gpu = result.nvidia_gpu or "Linux"
             end
         end
         modules_f:close()
     end
+    result.nvidia_nouveau = nouveau_found
 
     -- nvidia-smi presence: PATH search instead of `command -v nvidia-smi`.
     for _, dir in ipairs(path_dirs) do
@@ -615,6 +625,14 @@ function M.nvidia_query(opts)
     return fields, false
 end
 
+-- Same helper as #1901/PR #2060's altab.lua/batterynotify.lua/dconf.lua: a
+-- lone "'...'" wrap doesn't survive an apostrophe inside the path itself.
+local function shell_quote(arg)
+    arg = tostring(arg)
+    arg = arg:gsub("'", "'\\''")
+    return "'" .. arg .. "'"
+end
+
 --- AMD vendor branch. Parses amdgpu.py's JSON (see Configs/.local/lib/hyde/
 --- amdgpu.py) with luautils.json instead of `jq`+`sed`. Falls back to the
 --- generic sensors/proc-stat/cpufreq/battery reads whenever the output isn't
@@ -677,6 +695,15 @@ function M.cli_main(argv, opts)
     parser:flag("--startup", "Set this GPU at startup (used with --use)")
     local args = parser:parse(argv)
 
+    -- Validated before it becomes part of a filesystem path below: an
+    -- unchecked --use value (e.g. "../../../home/user/.config/foo") would
+    -- otherwise let a cold start read/write an arbitrary JSON file outside
+    -- the runtime dir once concatenated into the state suffix.
+    if args.use and not VENDOR_STAT_KEY[args.use] then
+        print_fn("Error: Invalid argument for --use. Use amd, intel, or nvidia.")
+        return 1
+    end
+
     local suffix = opts.state_suffix_override or (args.startup and "" or (args.use and ("_" .. args.use) or ""))
     local state = M.read_state(suffix)
 
@@ -699,6 +726,7 @@ function M.cli_main(argv, opts)
         state.amd_enable = detected.amd
         state.intel_enable = detected.intel
         state.nvidia_gpu = detected.nvidia_gpu
+        state.nvidia_nouveau = detected.nvidia_nouveau
         state.amd_gpu = detected.amd_gpu
         state.intel_gpu = detected.intel_gpu
         state.nvidia_addr = detected.nvidia_addr
@@ -792,7 +820,7 @@ function M.cli_main(argv, opts)
     if state.nvidia_enable then
         local nvidia_fields, suspended = M.nvidia_query({
             nvidia_gpu = state.nvidia_gpu,
-            is_nouveau = state.nvidia_gpu == "Linux",
+            is_nouveau = state.nvidia_nouveau,
             nvidia_addr = state.nvidia_addr,
             tired = state.tired,
             nvidia_smi_cmd = opts.nvidia_smi_cmd,
@@ -816,9 +844,11 @@ function M.cli_main(argv, opts)
             )
         local amdgpu_output = opts.amdgpu_output
         if not amdgpu_output then
-            -- Quoted: both paths are filesystem paths that may contain spaces.
+            -- Quoted: both paths are filesystem paths that may contain spaces
+            -- or (a wrapping "'...'" alone doesn't handle) an apostrophe --
+            -- same fix as #1901/PR #2060's shell_quote in altab.lua et al.
             local handle = io.popen(
-                "'" .. python_bin .. "' '" .. (opts.amdgpu_py_cmd or (root .. "amdgpu.py")) .. "' 2>/dev/null"
+                shell_quote(python_bin) .. " " .. shell_quote(opts.amdgpu_py_cmd or (root .. "amdgpu.py")) .. " 2>/dev/null"
             )
             amdgpu_output = handle and handle:read("*a") or ""
             if handle then

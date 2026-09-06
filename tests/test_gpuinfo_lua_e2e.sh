@@ -73,7 +73,19 @@ EOF
 chmod +x "$fake_bin/sensors"
 rm -rf "$work_dir/runtime"
 mkdir -p "$work_dir/runtime"
-both_stdout=$(run 2>"$work_dir/stderr")
+# Isolated from the plain CLI's real /sys/bus/pci/devices + /proc/modules
+# scan: on a runner with actual (or virtualized) AMD/NVIDIA hardware, real
+# detection could route this through a vendor-specific query instead of the
+# generic sensors path this case is meant to exercise, making the "60°C"
+# assertion below depend on what happens to be plugged into the machine
+# running the suite rather than on gpuinfo.lua's own priority logic.
+both_stdout=$(XDG_RUNTIME_DIR="$work_dir/runtime" REPO_ROOT="$REPO_ROOT" PATH="$fake_bin:$PATH" lua -e '
+package.path = os.getenv("REPO_ROOT") .. "/Configs/.local/lib/hyde/?.lua;" .. package.path
+local gpuinfo = require("gpuinfo")
+os.exit(gpuinfo.cli_main({}, {
+    detect_vendor_opts = {pci_dir = "/nonexistent", modules_file = "/nonexistent"},
+}))
+' 2>"$work_dir/stderr")
 case $both_stdout in
 *'60°C'*) ;;
 *) fail "with both Tctl and edge present, edge (the GPU reading) did not win as the new documented priority: $both_stdout" ;;

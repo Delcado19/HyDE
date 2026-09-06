@@ -166,4 +166,31 @@ check(
     "nvidia_addr should still record the address even though result.nvidia is false"
 )
 
+-- Same PCI device, but with nouveau actually loaded this time -- and with
+-- lspci resolving a real name (as it will on an actual nouveau host), not
+-- the "Linux" placeholder. nvidia_nouveau must still record nouveau's
+-- presence independently of whatever name got resolved (caught in review:
+-- cli_main used to infer "is this nouveau" by comparing nvidia_gpu against
+-- the literal placeholder string "Linux", which is only ever set when PCI
+-- detection found *no* resolvable name -- a real name here would have
+-- silently misidentified this exact case as "not nouveau" and sent it down
+-- the nvidia-smi path instead, which nouveau has no way to answer).
+local nouveau_modules = work_dir .. "/modules_with_nouveau"
+write_file(nouveau_modules, "nouveau 2097152 4 -\nsome_other_module 1000 1 -\n")
+local nouveau_result = gpuinfo.detect_vendor({
+    pci_dir = nodriver_dir,
+    modules_file = nouveau_modules,
+    path_dirs = {fake_bin},
+    lspci_cmd = "lspci",
+})
+check(
+    nouveau_result.nvidia_gpu == "GA106M",
+    "a real lspci-resolved name should survive nouveau detection: got " .. tostring(nouveau_result.nvidia_gpu)
+)
+check(
+    nouveau_result.nvidia_nouveau == true,
+    "nouveau presence was not recorded independently of the resolved GPU name"
+)
+check(nouveau_result.nvidia == true, "nvidia should be true once nouveau provides a way to query it")
+
 os.exit(failures == 0 and 0 or 1)

@@ -53,7 +53,7 @@ end
 -- show up as a line the loop below rejects.
 os.remove(gpuinfo.state_path("_cli_test"))
 local warn_lines = {}
-local code1, out1 = run({"--use", "nonexistent-vendor-suffix-for-isolation"}, {
+local code1, out1 = run({}, {
     warn_fn = function(s) warn_lines[#warn_lines + 1] = s end,
 })
 check(#warn_lines > 0, "the cold-start 'Initialized: ...' diagnostic did not go through warn_fn at all")
@@ -73,6 +73,23 @@ check(out2:find("GPU not enabled%."), "--stat for an undetected vendor did not p
 local code3, out3 = run({"--stat", "bogus"})
 check(code3 ~= 0, "--stat with an invalid vendor name did not exit non-zero")
 check(out3:find("Invalid argument for %-%-stat"), "--stat with an invalid vendor name did not print the documented error")
+
+-- --use is rejected the same way *before* it becomes part of the state
+-- suffix -- an unchecked value would otherwise let a cold start read/write
+-- a JSON file outside the runtime dir once concatenated into a path
+-- (caught in review: --use "../../../etc/passwd"-shaped input reached
+-- M.state_path unvalidated).
+local code4, out4 = run({"--use", "bogus"})
+check(code4 ~= 0, "--use with an invalid vendor name did not exit non-zero")
+check(out4:find("Invalid argument for %-%-use"), "--use with an invalid vendor name did not print the documented error")
+
+local traversal_suffix = "_../../outside-runtime-dir"
+local code5 = run({"--use", "../../outside-runtime-dir"})
+check(code5 ~= 0, "--use with a path-traversal-shaped value did not exit non-zero")
+check(
+    not gpuinfo.read_state(traversal_suffix).detected,
+    "a rejected --use value still reached the state path and got written"
+)
 
 -- Detection must run once and stay run, even when it finds nothing: on
 -- hardware with none of the three recognized vendors every *_enable stays
@@ -104,5 +121,42 @@ local reset_with_flag = gpuinfo.read_state("_cli_test")
 check(reset_with_flag.tired == true, "--reset wiped a --tired flag passed on the same invocation")
 
 os.remove(gpuinfo.state_path("_cli_test"))
+
+-- The AMD branch's own command construction must survive an apostrophe in
+-- python_bin/amdgpu_py_cmd -- same class of bug as #1901/PR #2060's
+-- shell_quote fix in altab.lua et al., caught here in review: a bare
+-- "'...'" wrap alone breaks on one, so the command silently returns nothing
+-- and this falls back to generic sensor readings instead of surfacing real
+-- AMD data.
+local amd_suffix = "_cli_test_amd_quote"
+os.remove(gpuinfo.state_path(amd_suffix))
+gpuinfo.write_state(amd_suffix, {
+    detected = true,
+    amd_enable = true,
+    amd_gpu = "Test GPU",
+    available = {"amd"},
+    priority = "amd",
+})
+local quote_dir = work_dir .. "/o'brien"
+os.execute('mkdir -p "' .. quote_dir .. '"')
+local fake_python = quote_dir .. "/python"
+local script = assert(io.open(fake_python, "w"))
+script:write([[#!/bin/sh
+cat <<'JSON'
+{"GPU Temperature": "62°C", "GPU Load": "45.0%", "GPU Core Clock": "1500 MHz", "GPU Power Usage": "120 Watts"}
+JSON
+]])
+script:close()
+os.execute('chmod +x "' .. fake_python .. '"')
+local _, quote_out = run({}, {
+    state_suffix_override = amd_suffix,
+    python_bin = fake_python,
+    amdgpu_py_cmd = fake_python, -- content ignored by the fake script; just needs to exist as an argument
+})
+check(
+    quote_out:find("62"),
+    "an apostrophe in python_bin broke the AMD command's quoting, fell back to generic sensors instead: " .. quote_out
+)
+os.remove(gpuinfo.state_path(amd_suffix))
 
 os.exit(failures == 0 and 0 or 1)
