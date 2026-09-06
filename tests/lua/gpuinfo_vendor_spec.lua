@@ -72,4 +72,41 @@ local garbage_result = gpuinfo.detect_vendor({
 })
 check(garbage_result.nvidia == false, "a device with a garbage class file was still detected as a GPU")
 
+-- nvidia GPU physically present but no driver available: nvidia must be false
+-- since there's no way to query it (matching bash original behavior).
+local nodriver_dir = work_dir .. "/pci_nodriver"
+os.execute("mkdir -p " .. nodriver_dir .. "/0000:02:00.0")
+write_file(nodriver_dir .. "/0000:02:00.0/class", "0x030200\n")  -- 3D controller
+write_file(nodriver_dir .. "/0000:02:00.0/vendor", "0x10de\n")   -- nvidia
+write_file(fake_bin .. "/lspci", [[#!/bin/sh
+if [ "$3" = "0000:02:00.0" ]; then
+    echo "02:00.0 3D controller [0302]: NVIDIA Corporation GA106M [2504:1234]"
+else
+    echo "unexpected address: $3" >&2
+    exit 1
+fi
+]])
+os.execute("chmod +x " .. fake_bin .. "/lspci")
+
+-- Empty modules file (no nouveau) and empty bin dir (no nvidia-smi)
+local empty_bin = work_dir .. "/empty_bin"
+os.execute("mkdir -p " .. empty_bin)
+local nodriver_modules = work_dir .. "/modules_no_nouveau"
+write_file(nodriver_modules, "some_other_module 1000 1 -\n")
+
+local nodriver_result = gpuinfo.detect_vendor({
+    pci_dir = nodriver_dir,
+    modules_file = nodriver_modules,
+    path_dirs = {empty_bin},
+    lspci_cmd = "lspci",
+})
+check(
+    nodriver_result.nvidia == false,
+    "nvidia GPU without any driver should be false (no nouveau, no nvidia-smi), but got: " .. tostring(nodriver_result.nvidia)
+)
+check(
+    nodriver_result.nvidia_addr == "0000:02:00.0",
+    "nvidia_addr should still record the address even though result.nvidia is false"
+)
+
 os.exit(failures == 0 and 0 or 1)

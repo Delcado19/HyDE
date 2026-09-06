@@ -138,6 +138,7 @@ function M.detect_vendor(opts)
     local resolved_lspci = find_in_path(lspci_cmd, path_dirs) or lspci_cmd
 
     local result = {nvidia = false, amd = false, intel = false}
+    local nouveau_found = false
 
     if lfs.attributes(pci_dir, "mode") == "directory" then
         for entry in lfs.dir(pci_dir) do
@@ -167,7 +168,7 @@ function M.detect_vendor(opts)
     if modules_f then
         for line in modules_f:lines() do
             if line:match("^nouveau%s") then
-                result.nvidia = true
+                nouveau_found = true
                 result.nvidia_gpu = result.nvidia_gpu or "Linux"
             end
         end
@@ -182,6 +183,11 @@ function M.detect_vendor(opts)
                 break
             end
         end
+    end
+
+    -- nvidia is only true if there's a way to query it (nouveau or nvidia-smi present)
+    if result.nvidia and not (nouveau_found or result.nvidia_smi_present) then
+        result.nvidia = false
     end
 
     return result
