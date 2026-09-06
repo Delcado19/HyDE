@@ -227,14 +227,32 @@ general_query() {
         GPUINFO_PREV_STAT=$currStat
         GPUINFO_PREV_IDLE=$currIdle
         sed -i -e "/^GPUINFO_PREV_STAT=/c\GPUINFO_PREV_STAT=\"$currStat\"" -e "/^GPUINFO_PREV_IDLE=/c\GPUINFO_PREV_IDLE=\"$currIdle\"" "$gpuinfo_file" || {
-            echo "GPUINFO_PREV_STAT=\"$currStat\"" >>"$cpuinfo_file"
-            echo "GPUINFO_PREV_IDLE=\"$currIdle\"" >>"$cpuinfo_file"
+            echo "GPUINFO_PREV_STAT=\"$currStat\"" >>"$gpuinfo_file"
+            echo "GPUINFO_PREV_IDLE=\"$currIdle\"" >>"$gpuinfo_file"
         }
         awk -v stat="$diffStat" -v idle="$diffIdle" 'BEGIN {total=stat+idle; printf "%.1f", (total > 0 ? (stat/total)*100 : 0)}'
     }
     utilization=$(get_utilization)
-    current_clock_speed=$(awk '{sum += $1; n++} END {if (n > 0) print sum / n / 1000 ""}' /sys/devices/system/cpu/cpufreq/policy*/scaling_cur_freq)
-    max_clock_speed=$(awk '{print $1/1000}' /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq)
+    # As with power_now above: a host with no cpufreq scaling driver (common on
+    # virtualized/cloud CPUs and this project's own CI runner) has no
+    # /sys/devices/system/cpu/cpufreq tree at all, so the glob doesn't match and
+    # bash passes the literal pattern through -- letting awk open it directly
+    # turns that into a fatal error on every poll (#2028). Read each file only
+    # if it exists, and feed the values to awk instead of the path.
+    local cpu_sysfs_dir="${GPUINFO_CPU_SYSFS_DIR:-/sys/devices/system/cpu}"
+    local clock_sum=0 clock_n=0 freq
+    for file in "$cpu_sysfs_dir"/cpufreq/policy*/scaling_cur_freq; do
+        [[ -f $file ]] && freq=$(cat "$file" 2>/dev/null) && [[ -n $freq ]] &&
+            clock_sum=$((clock_sum + freq)) && clock_n=$((clock_n + 1))
+    done
+    current_clock_speed=""
+    [[ $clock_n -gt 0 ]] && current_clock_speed=$(awk -v sum="$clock_sum" -v n="$clock_n" 'BEGIN {print sum / n / 1000 ""}')
+    max_clock_speed=""
+    max_freq_file="$cpu_sysfs_dir/cpu0/cpufreq/cpuinfo_max_freq"
+    if [[ -f $max_freq_file ]]; then
+        max_freq_raw=$(cat "$max_freq_file" 2>/dev/null)
+        [[ -n $max_freq_raw ]] && max_clock_speed=$(awk -v v="$max_freq_raw" 'BEGIN {print v/1000}')
+    fi
 }
 intel_GPU() {
     primary_gpu="Intel $GPUINFO_INTEL_GPU"

@@ -113,14 +113,52 @@ else
         >/dev/null 2>"$stderr_file"
     unreadable_stderr=$(cat "$stderr_file")
 
-    # Match only a fatal that names power_now. The script has other awk calls
-    # that open files directly -- the cpufreq ones -- and those fail the same
-    # way wherever the host kernel has no cpufreq scaling driver loaded, which
-    # is the case on this project's CI runner.
-    # Matching any "awk: fatal" would fail this case for an unrelated reason.
-    if printf '%s\n' "$unreadable_stderr" | grep -q 'awk: fatal.*power_now'; then
+    # The cpufreq awk calls (#2028) used to fatal the same way on any host
+    # with no cpufreq scaling driver loaded, which is the case on this
+    # project's CI runner -- so this used to match only a fatal naming
+    # power_now, to avoid failing here for that unrelated, then-unfixed
+    # reason. Now that both are fixed, any awk fatal is a regression.
+    if printf '%s\n' "$unreadable_stderr" | grep -q 'awk: fatal'; then
         fail "an unreadable power_now leaked an awk fatal error to stderr: $unreadable_stderr"
     fi
 fi
+
+# A host with no cpufreq scaling driver (virtualized/cloud CPUs, some ARM
+# boards, and this project's own CI runner) has no
+# /sys/devices/system/cpu/cpufreq tree at all. The glob then doesn't match,
+# bash passes the literal pattern through, and letting awk open that directly
+# used to fatal on every poll (#2028). An empty directory reproduces the same
+# "tree not present" shape portably.
+empty_cpu_sysfs=$(mktemp -d)
+rm -f "$state_file"
+cpufreq_stdout=$(GPUINFO_CPU_SYSFS_DIR="$empty_cpu_sysfs" PATH="$fake_bin:$PATH" bash "$script" \
+    2>"$stderr_file")
+cpufreq_stderr=$(cat "$stderr_file")
+rm -rf "$empty_cpu_sysfs"
+
+case $cpufreq_stderr in
+*"awk: fatal"*)
+    fail "a missing cpufreq sysfs tree leaked an awk fatal error to stderr: $cpufreq_stderr"
+    ;;
+esac
+if [ -z "$cpufreq_stdout" ] || ! printf '%s\n' "$cpufreq_stdout" | python3 -c '
+import json, sys
+lines = [line for line in sys.stdin.read().splitlines() if line.strip()]
+if not lines:
+    raise SystemExit(1)
+for line in lines:
+    if not isinstance(json.loads(line), dict):
+        raise SystemExit(1)
+' >/dev/null 2>&1; then
+    fail "a missing cpufreq sysfs tree produced a line on stdout that is not a JSON object: $cpufreq_stdout"
+fi
+
+# The utilization fallback (get_utilization's sed -i failure path) is meant to
+# append to the same state file the sed -i targeted. It used to reference
+# $cpuinfo_file, a variable this script never assigns (a leftover from
+# cpuinfo.sh, which this block was copied from) -- so the fallback silently
+# wrote nowhere instead of persisting utilization state (#2028).
+grep -q '>>"\$cpuinfo_file"' "$script" &&
+    fail "the utilization fallback still writes to \$cpuinfo_file, which gpuinfo.sh never assigns (#2028)"
 
 finish
