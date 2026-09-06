@@ -153,6 +153,69 @@ for line in lines:
     fail "a missing cpufreq sysfs tree produced a line on stdout that is not a JSON object: $cpufreq_stdout"
 fi
 
+# Sanity check that the rewritten averaging loop still computes the right
+# number for well-formed, in-spec sysfs content, not just that it survives
+# missing files -- two policies at 1.2GHz/2.4GHz should average to 1800MHz,
+# against a 3.6GHz max.
+fake_cpu_sysfs=$(mktemp -d)
+mkdir -p "$fake_cpu_sysfs/cpufreq/policy0" "$fake_cpu_sysfs/cpufreq/policy1" "$fake_cpu_sysfs/cpu0/cpufreq"
+printf '1200000' >"$fake_cpu_sysfs/cpufreq/policy0/scaling_cur_freq"
+printf '2400000' >"$fake_cpu_sysfs/cpufreq/policy1/scaling_cur_freq"
+printf '3600000' >"$fake_cpu_sysfs/cpu0/cpufreq/cpuinfo_max_freq"
+rm -f "$state_file"
+valid_stdout=$(GPUINFO_CPU_SYSFS_DIR="$fake_cpu_sysfs" PATH="$fake_bin:$PATH" bash "$script" 2>"$stderr_file")
+valid_stderr=$(cat "$stderr_file")
+rm -rf "$fake_cpu_sysfs"
+
+case $valid_stdout in
+*'1800/3600 MHz'*) ;;
+*) fail "well-formed cpufreq sysfs content (1.2GHz+2.4GHz avg, 3.6GHz max) did not produce '1800/3600 MHz': $valid_stdout" ;;
+esac
+case $valid_stderr in
+*"awk: fatal"*) fail "well-formed cpufreq sysfs content still leaked an awk fatal error to stderr: $valid_stderr" ;;
+esac
+
+# Out-of-spec content is the case that actually matters here: sysfs is
+# documented to hold a plain integer, but a fix that lets awk open a missing
+# path directly fatal (the original bug) is easy to replace with one that
+# instead runs $((...)) bash arithmetic on whatever the file holds -- and
+# bash's arithmetic evaluator throws its own "syntax error" for anything that
+# isn't a plain integer (e.g. a decimal point), printing a diagnostic to
+# stderr on every single poll. That is the same class of regression #2028 set
+# out to remove, just from a different builtin. LC_ALL=C.utf8 keeps the
+# assertion below from depending on the host's locale, since bash localizes
+# this message (this project's own dev machine has it in German) -- plain
+# LC_ALL=C would also do that but switches the charset to ASCII, which
+# mangles the icons the JSON output embeds and breaks the JSON-shape check
+# below for an unrelated reason.
+malformed_cpu_sysfs=$(mktemp -d)
+mkdir -p "$malformed_cpu_sysfs/cpufreq/policy0" "$malformed_cpu_sysfs/cpu0/cpufreq"
+printf '12.5' >"$malformed_cpu_sysfs/cpufreq/policy0/scaling_cur_freq"
+printf 'not-a-number' >"$malformed_cpu_sysfs/cpu0/cpufreq/cpuinfo_max_freq"
+rm -f "$state_file"
+malformed_stdout=$(LC_ALL=C.utf8 GPUINFO_CPU_SYSFS_DIR="$malformed_cpu_sysfs" PATH="$fake_bin:$PATH" bash "$script" \
+    2>"$stderr_file")
+malformed_status=$?
+malformed_stderr=$(cat "$stderr_file")
+rm -rf "$malformed_cpu_sysfs"
+
+case $malformed_stderr in
+*"syntax error"*)
+    fail "malformed cpufreq sysfs content leaked a bash arithmetic error to stderr on every poll: $malformed_stderr"
+    ;;
+esac
+if [ -z "$malformed_stdout" ] || ! printf '%s\n' "$malformed_stdout" | python3 -c '
+import json, sys
+lines = [line for line in sys.stdin.read().splitlines() if line.strip()]
+if not lines:
+    raise SystemExit(1)
+for line in lines:
+    if not isinstance(json.loads(line), dict):
+        raise SystemExit(1)
+' >/dev/null 2>&1; then
+    fail "malformed cpufreq sysfs content produced a line on stdout that is not a JSON object (status $malformed_status): $malformed_stdout"
+fi
+
 # The utilization fallback (get_utilization's sed -i failure path) is meant to
 # append to the same state file the sed -i targeted. It used to reference
 # $cpuinfo_file, a variable this script never assigns (a leftover from

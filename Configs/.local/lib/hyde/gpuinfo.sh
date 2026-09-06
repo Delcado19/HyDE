@@ -238,15 +238,18 @@ general_query() {
     # /sys/devices/system/cpu/cpufreq tree at all, so the glob doesn't match and
     # bash passes the literal pattern through -- letting awk open it directly
     # turns that into a fatal error on every poll (#2028). Read each file only
-    # if it exists, and feed the values to awk instead of the path.
+    # if it exists, and let awk do the summing: bash's own $((...)) throws a
+    # syntax error (killing the whole script, not just this calculation) on
+    # anything that isn't a plain integer, whereas awk coerces malformed sysfs
+    # content to 0 instead of dying on it.
     local cpu_sysfs_dir="${GPUINFO_CPU_SYSFS_DIR:-/sys/devices/system/cpu}"
-    local clock_sum=0 clock_n=0 freq
+    local freq clock_freqs=()
     for file in "$cpu_sysfs_dir"/cpufreq/policy*/scaling_cur_freq; do
-        [[ -f $file ]] && freq=$(cat "$file" 2>/dev/null) && [[ -n $freq ]] &&
-            clock_sum=$((clock_sum + freq)) && clock_n=$((clock_n + 1))
+        [[ -f $file ]] && freq=$(cat "$file" 2>/dev/null) && [[ -n $freq ]] && clock_freqs+=("$freq")
     done
     current_clock_speed=""
-    [[ $clock_n -gt 0 ]] && current_clock_speed=$(awk -v sum="$clock_sum" -v n="$clock_n" 'BEGIN {print sum / n / 1000 ""}')
+    ((${#clock_freqs[@]} > 0)) &&
+        current_clock_speed=$(printf '%s\n' "${clock_freqs[@]}" | awk '{sum += $1; n++} END {if (n > 0) print sum / n / 1000 ""}')
     max_clock_speed=""
     max_freq_file="$cpu_sysfs_dir/cpu0/cpufreq/cpuinfo_max_freq"
     if [[ -f $max_freq_file ]]; then
