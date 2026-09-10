@@ -4,6 +4,24 @@ Notes from a clean CachyOS install (Hyprland selected as WM during the CachyOS
 installer) followed by `./install.sh` from this repo. Kept here as a record of
 what went wrong and what was done about it.
 
+**Root cause, in hindsight:** this repo's own `README.md` already says so —
+
+> Line 71: "The installation script is designed for a minimal Arch Linux
+> install, but **may** work on some Arch-based distros."
+>
+> Line 87: "[...] especially when HyDE is being installed alongside an
+> existing desktop environment [...]" (recommends a Timeshift snapshot first)
+
+CachyOS's "Hyprland + Noctalia" installer option is not a minimal Arch
+install — it ships a fully configured desktop environment (Noctalia shell,
+its own Hyprland Lua config, greetd) out of the box. `install.sh` is not
+designed to be layered on top of that, and nearly everything below (§1–§5)
+traces back to this one mismatch. Neither "CachyOS" nor "Noctalia" is named
+explicitly in the README, but the general warning already covers this exact
+scenario. Takeaway for next time: either pick a minimal/no-DE CachyOS
+profile before running `install.sh`, or budget time for exactly this kind of
+cleanup.
+
 ## 1. `install.sh` hangs indefinitely during theme apply
 
 **Symptom:** `install.sh` (via `theme.switch.sh -q`) hangs forever, seemingly
