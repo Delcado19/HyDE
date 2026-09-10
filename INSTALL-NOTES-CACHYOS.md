@@ -22,6 +22,13 @@ scenario. Takeaway for next time: either pick a minimal/no-DE CachyOS
 profile before running `install.sh`, or budget time for exactly this kind of
 cleanup.
 
+**Confirmed, 2026-09-10:** installing this fork's `main` branch on a CachyOS
+system installed *without* a window manager preselected (i.e. no
+Hyprland+Noctalia preset, no pre-existing desktop environment) went through
+cleanly, with none of the issues in §1–§5 below. This matches the root-cause
+theory above — the problems trace back to `install.sh` being layered on top
+of an already-configured DE, not to `install.sh` itself.
+
 ## 1. `install.sh` hangs indefinitely during theme apply
 
 **Symptom:** `install.sh` (via `theme.switch.sh -q`) hangs forever, seemingly
