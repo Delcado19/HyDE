@@ -1,119 +1,61 @@
 local root = debug.getinfo(1, "S").source:match("^@(.*/)") or "./"
 package.path = root .. "../../Configs/.local/lib/hyde/?.lua;" .. package.path
 local gpuinfo = require("gpuinfo")
-
-local failures = 0
-local function check(condition, message)
-    if not condition then
-        failures = failures + 1
-        print("    fail: " .. message)
-    end
+local work = assert(os.getenv("GPUINFO_TEST_WORK_DIR"))
+local function write(path, value)
+    local f = assert(io.open(path, "w")); f:write(value); f:close()
 end
-
-local function write_file(path, content)
-    local f = assert(io.open(path, "w"))
-    f:write(content)
-    f:close()
-end
-
-local work_dir = os.getenv("GPUINFO_TEST_WORK_DIR")
-assert(work_dir, "GPUINFO_TEST_WORK_DIR must be set by the test wrapper")
-
--- A fake nvidia-smi that answers the exact --query-gpu the bash version used.
-local fake_bin = work_dir .. "/bin"
-os.execute("mkdir -p " .. fake_bin)
-write_file(fake_bin .. "/nvidia-smi", [[#!/bin/sh
-echo "62, 45, 1800, 3600, 120.00, 200.00"
+local command = work .. "/nvidia-smi"
+-- Validate the exact selected device, not merely whether a command ran.
+write(command, [[#!/bin/sh
+[ "$1" = "--id=0000:01:00.0" ] || exit 8
+query='--query-gpu=temperature.gpu,utilization.gpu,clocks.current.graphics,'
+query="${query}clocks.max.graphics,power.draw,power.limit"
+[ "$2" = "$query" ] || exit 9
+cat "$GPUINFO_TEST_WORK_DIR/csv"
+exit "$(cat "$GPUINFO_TEST_WORK_DIR/status")"
 ]])
-os.execute("chmod +x " .. fake_bin .. "/nvidia-smi")
-
-local fields = gpuinfo.nvidia_query({
-    nvidia_gpu = "GeForce RTX 4070",
-    nvidia_smi_cmd = fake_bin .. "/nvidia-smi",
-})
-check(fields.primary_gpu == "NVIDIA GeForce RTX 4070", "primary_gpu was not set correctly: got " .. tostring(fields.primary_gpu))
-check(fields.temperature == "62", "temperature was not parsed from the CSV output: got " .. tostring(fields.temperature))
-check(fields.current_clock_speed == "1800", "current_clock_speed was not parsed: got " .. tostring(fields.current_clock_speed))
-check(fields.power_limit == "200.00", "power_limit was not parsed: got " .. tostring(fields.power_limit))
-
--- --tired + suspended: must report suspended rather than calling nvidia-smi
--- at all (a suspended discrete GPU should not be woken just to poll it).
-local runtime_status_path = work_dir .. "/runtime_status"
-write_file(runtime_status_path, "suspended\n")
-local suspend_fields, suspended = gpuinfo.nvidia_query({
-    nvidia_gpu = "GeForce RTX 4070",
-    tired = true,
-    runtime_status_path = runtime_status_path,
-    nvidia_smi_cmd = fake_bin .. "/nonexistent-should-not-be-called",
-})
-check(suspended == true, "a suspended GPU with --tired was not reported as suspended")
-check(suspend_fields.primary_gpu == "NVIDIA GeForce RTX 4070", "suspended fields did not still carry primary_gpu")
-
--- nouveau (is_nouveau=true) uses the generic sensors-based query instead of
--- nvidia-smi (nouveau has no nvidia-smi to call).
-local nouveau_fields = gpuinfo.nvidia_query({
-    nvidia_gpu = "Linux",
-    is_nouveau = true,
-    sensors_json = "{}",
-    stat_file = "/proc/stat",
-    cpu_sysfs_dir = work_dir .. "/no-such-cpufreq-dir",
-    power_supply_dir = work_dir .. "/no-such-power-dir",
-})
-check(nouveau_fields.primary_gpu == "NVIDIA Linux", "nouveau path did not set primary_gpu")
-
--- The same --tired check, but exercising the *default* runtime_status path
--- construction rather than the full runtime_status_path override above -- the
--- override masked a double "0000:" domain prefix that made the real path never
--- exist, so suspend was never detected on actual hardware. detect_vendor
--- stores nvidia_addr straight from the sysfs directory entry name, which is
--- already domain-qualified, so that is what is passed here.
-local pci_devices_dir = work_dir .. "/pci-devices"
-os.execute("mkdir -p '" .. pci_devices_dir .. "/0000:01:00.0/power'")
-write_file(pci_devices_dir .. "/0000:01:00.0/power/runtime_status", "suspended\n")
-local _, default_path_suspended = gpuinfo.nvidia_query({
-    nvidia_gpu = "GeForce RTX 4070",
-    tired = true,
-    nvidia_addr = "0000:01:00.0",
-    pci_devices_dir = pci_devices_dir,
-    nvidia_smi_cmd = fake_bin .. "/nonexistent-should-not-be-called",
-})
-check(default_path_suspended == true, "suspend was not detected via the default runtime_status path construction")
-
--- Out-of-spec: an active GPU, and a missing/unreadable runtime_status file,
--- both have to fall through to the normal query rather than reporting suspend.
-write_file(pci_devices_dir .. "/0000:01:00.0/power/runtime_status", "active\n")
-local active_fields, active_suspended = gpuinfo.nvidia_query({
-    nvidia_gpu = "GeForce RTX 4070",
-    tired = true,
-    nvidia_addr = "0000:01:00.0",
-    pci_devices_dir = pci_devices_dir,
-    nvidia_smi_cmd = fake_bin .. "/nvidia-smi",
-})
-check(active_suspended == false, "an active GPU was reported as suspended")
-check(active_fields.temperature == "62", "an active GPU with --tired did not fall through to nvidia-smi")
-
-local _, missing_suspended = gpuinfo.nvidia_query({
-    nvidia_gpu = "GeForce RTX 4070",
-    tired = true,
-    nvidia_addr = "0000:99:00.0",
-    pci_devices_dir = pci_devices_dir,
-    nvidia_smi_cmd = fake_bin .. "/nvidia-smi",
-})
-check(missing_suspended == false, "a missing runtime_status file was treated as suspended")
-
--- Out-of-spec: no nvidia_addr at all (a state file written before the addr was
--- recorded) must not crash on a nil concatenation.
-local nil_addr_ok = pcall(gpuinfo.nvidia_query, {
-    nvidia_gpu = "GeForce RTX 4070",
-    tired = true,
-    pci_devices_dir = pci_devices_dir,
-    nvidia_smi_cmd = fake_bin .. "/nvidia-smi",
-})
-check(nil_addr_ok, "a nil nvidia_addr raised instead of degrading to 'not suspended'")
-
--- Out-of-spec: a nil GPU name (a phantom vendor selected from a state file
--- that never recorded one) must not raise on the primary_gpu concatenation.
-local nil_name_ok = pcall(gpuinfo.nvidia_query, {nvidia_smi_cmd = fake_bin .. "/nvidia-smi"})
-check(nil_name_ok, "a nil nvidia_gpu name raised on the primary_gpu concatenation")
-
-os.exit(failures == 0 and 0 or 1)
+assert(os.execute("chmod +x " .. command))
+write(work .. "/csv", "62, 45, 1800, 3600, 120.00, 200.00\n")
+write(work .. "/status", "0")
+local opts = {
+    nvidia_gpu = "GeForce RTX 4070", nvidia_addr = "0000:01:00.0",
+    nvidia_smi_cmd = command, pci_devices_dir = work .. "/pci",
+}
+local result = gpuinfo.nvidia_query(opts)
+assert(result.temperature == 62 and result.utilization == 45)
+assert(result.current_clock_speed == 1800 and result.power_limit == 200)
+assert(result.primary_gpu == "NVIDIA GeForce RTX 4070")
+assert(result.fan_speed == nil, "nvidia-smi target fan percentage must not become RPM")
+write(work .. "/csv", ", 45, [N/A], 3600, 0, 200\n")
+result = gpuinfo.nvidia_query(opts)
+assert(result.temperature == nil and result.utilization == 45)
+assert(result.current_clock_speed == nil and result.power_usage == 0)
+for _, csv in ipairs({"", "error", "1,2,3", "1,2,3,4,5,6,7", "nan,101,inf,-1,[N/A],NaN"}) do
+    write(work .. "/csv", csv)
+    result = gpuinfo.nvidia_query(opts)
+    assert(result.temperature == nil and result.utilization == nil and result.power_usage == nil)
+end
+write(work .. "/csv", "62,45,1800,3600,120,200")
+write(work .. "/status", "1")
+assert(gpuinfo.nvidia_query(opts).temperature == nil, "failed query output must be ignored")
+write(work .. "/status", "0")
+local power = work .. "/pci/0000:01:00.0/power"
+assert(os.execute("mkdir -p " .. power))
+write(power .. "/runtime_status", "suspended\n")
+opts.tired = true
+opts.nvidia_smi_cmd = work .. "/must-not-run"
+local fields, suspended = gpuinfo.nvidia_query(opts)
+assert(suspended and fields.temperature == nil)
+opts.is_nouveau = true
+assert(select(2, gpuinfo.nvidia_query(opts)), "nouveau --tired must also respect suspend")
+opts.tired = false
+assert(gpuinfo.nvidia_query(opts).temperature == nil, "nouveau must not read unrelated sensors")
+opts.is_nouveau = false
+for _, addr in ipairs({"", "../escape", "0000:01:00.0;touch injected", "0000:01:00.9"}) do
+    opts.nvidia_addr = addr
+    assert(gpuinfo.nvidia_query(opts).temperature == nil)
+end
+opts.nvidia_addr = nil
+assert(gpuinfo.nvidia_query(opts).temperature == nil)
+print("NVIDIA device selection, invalid input, and suspend checks passed")

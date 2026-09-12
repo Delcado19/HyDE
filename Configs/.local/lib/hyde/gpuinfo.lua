@@ -102,7 +102,8 @@ local function lookup_pci_name(lspci_cmd, addr)
     if not line then
         return nil
     end
-    -- "00:02.0 VGA compatible controller [0300]: Intel Corporation Kaby Lake-U GT2 [HD Graphics 620] [8086:5916] (rev 02)"
+    -- Example device: "Intel Corporation Kaby Lake-U GT2 [HD Graphics 620]
+    -- [8086:5916] (rev 02)", following the PCI address and class prefix.
     -- -> "Kaby Lake-U GT2 [HD Graphics 620]" (drop the vendor prefix, the
     -- trailing [ids] bracket, and the (rev) suffix -- but keep a marketing-
     -- name bracket like "[HD Graphics 620]" or "[GeForce RTX 3060]": that's
@@ -194,7 +195,7 @@ function M.detect_vendor(opts)
                 -- present (caught in review: cli_main used to do exactly
                 -- that comparison, so a nouveau host that also happened to
                 -- have a resolvable lspci name took the nvidia-smi path
-                -- and got nothing back instead of the generic sensor path).
+                -- and got nothing back instead of the device's hwmon data).
                 result.nvidia_gpu = result.nvidia_gpu or "Linux"
             end
         end
@@ -296,172 +297,74 @@ function M.toggle(state, requested)
     return next_vendor
 end
 
---- Reads battery discharge power in watts from /sys/class/power_supply
---- (or `power_supply_dir` in tests), pure Lua -- no awk. Prefers power_now
---- (microwatts); falls back to current_now*voltage_now (microamps *
---- microvolts) when power_now is missing or unreadable/empty, since some
---- laptops' embedded controller answers ENXIO for power_now specifically.
-function M.read_battery_discharge(power_supply_dir)
-    if lfs.attributes(power_supply_dir, "mode") ~= "directory" then
+-- Only accept finite decimal measurements. Missing files, driver error
+-- strings, NaN and invalid types must never become plausible zero readings.
+local function measurement(value, maximum)
+    if type(value) == "string" then
+        value = value:match("^%s*([+-]?%d+%.?%d*)%s*$")
+    elseif type(value) ~= "number" then
         return nil
     end
-    for entry in lfs.dir(power_supply_dir) do
-        if entry:match("^BAT") then
-            local bat_dir = power_supply_dir .. "/" .. entry
-            local power_raw = read_first_line(bat_dir .. "/power_now")
-            local power_now = power_raw and tonumber(power_raw)
-            if power_now then
-                return power_now * 1e-6
-            end
-            local current_raw = read_first_line(bat_dir .. "/current_now")
-            local voltage_raw = read_first_line(bat_dir .. "/voltage_now")
-            local current_now = current_raw and tonumber(current_raw)
-            local voltage_now = voltage_raw and tonumber(voltage_raw)
-            if current_now and voltage_now then
-                return (current_now * voltage_now) / 1e12
-            end
-        end
+    local number = tonumber(value)
+    if not number or number ~= number or number == math.huge or number < 0
+        or (maximum and number > maximum) then
+        return nil
     end
-    return nil
+    return number
 end
 
---- Reads current CPU utilization as a percentage, diffed against the
---- previous poll's totals persisted in `state.prev_stat`/`state.prev_idle`.
---- Seeds both to the current reading on the very first call (no prior state),
---- which makes that first call report 0% instead of a division-by-zero or a
---- nonsense diff against zero -- the same cold-start contract #2021/#2022
---- already fixed for the bash version.
-function M.read_cpu_utilization(state, stat_file)
-    stat_file = stat_file or "/proc/stat"
-    -- Degrades like every sibling reader here: a missing or malformed stat
-    -- file reads as 0%, it never raises. This runs on every poll, and a raise
-    -- would take the whole waybar module's JSON line down with it.
-    local f = io.open(stat_file, "r")
-    if not f then
-        return 0
-    end
-    local line = f:read("*l")
-    f:close()
-    local user, nice, system, idle, iowait, irq, softirq = (line or ""):match(
-        "^cpu%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)"
-    )
-    if not softirq then
-        return 0
-    end
-    local curr_stat = tonumber(user) + tonumber(nice) + tonumber(system)
-        + tonumber(irq) + tonumber(softirq) + tonumber(iowait)
-    local curr_idle = tonumber(idle)
-
-    local prev_stat = tonumber(state.prev_stat)
-    local prev_idle = tonumber(state.prev_idle)
-    if not prev_stat or not prev_idle then
-        prev_stat, prev_idle = curr_stat, curr_idle
-    end
-
-    local diff_stat = curr_stat - prev_stat
-    local diff_idle = curr_idle - prev_idle
-    state.prev_stat = curr_stat
-    state.prev_idle = curr_idle
-
-    local total = diff_stat + diff_idle
-    local pct = total > 0 and (diff_stat / total) * 100 or 0
-    return tonumber(string.format("%.1f", pct))
+local function pci_address(addr)
+    return type(addr) == "string" and addr:match("^%x%x%x%x:%x%x:%x%x%.[0-7]$") ~= nil
 end
 
---- Reads current (averaged across policies) and max CPU clock speed in MHz
---- from cpufreq sysfs, pure Lua -- no awk, and guarded existence checks
---- throughout so a host with no cpufreq scaling driver (virtualized/cloud
---- CPUs, some ARM boards, CI runners) reads as (nil, nil) instead of crashing.
-function M.read_cpu_clock_speed(cpu_sysfs_dir)
-    cpu_sysfs_dir = cpu_sysfs_dir or "/sys/devices/system/cpu"
-    local sum, count = 0, 0
-    local cpufreq_dir = cpu_sysfs_dir .. "/cpufreq"
-    if lfs.attributes(cpufreq_dir, "mode") == "directory" then
-        for entry in lfs.dir(cpufreq_dir) do
-            if entry:match("^policy") then
-                local raw = read_first_line(cpufreq_dir .. "/" .. entry .. "/scaling_cur_freq")
-                local khz = raw and tonumber(raw)
-                if khz then
-                    sum = sum + khz
-                    count = count + 1
-                end
+local function entries(path, pattern)
+    -- Devices may disappear between the existence check and opening sysfs.
+    local ok, iter, directory = pcall(lfs.dir, path)
+    local result = {}
+    if ok then
+        for entry in iter, directory do
+            if entry:match(pattern) then
+                result[#result + 1] = entry
             end
         end
+        table.sort(result)
     end
-    local current_mhz = count > 0 and (sum / count / 1000) or nil
-
-    local max_raw = read_first_line(cpu_sysfs_dir .. "/cpu0/cpufreq/cpuinfo_max_freq")
-    local max_khz = max_raw and tonumber(max_raw)
-    local max_mhz = max_khz and (max_khz / 1000) or nil
-
-    return current_mhz, max_mhz
+    return result
 end
 
--- Checked in this order for every chip in the sensors -j output: GPU
--- readings before CPU proxies (see spec: "Explicit behavior change").
-local TEMPERATURE_LABEL_PRIORITY = {"edge", "junction", "Tctl", "Tdie", "Package id"}
-
---- Parses `sensors -j` output (passed in as `sensors_json`, so this stays
---- testable without shelling out itself -- Task 11 wires the real
---- `io.popen("sensors -j 2>/dev/null")` call) into (temperature, fan_speed).
---- Malformed/empty input degrades to (nil, nil) rather than raising, since
---- this runs on every single poll.
-function M.read_sensors(sensors_json)
-    if not sensors_json or sensors_json == "" then
-        return nil, nil
+--- Read only sensors below the selected GPU's PCI device, never global
+--- sensors, CPU cpufreq, /proc/stat, or battery power. Intel i915 exposes
+--- actual GPU frequency in its DRM directory; unsupported metrics stay nil.
+function M.read_gpu_sysfs(opts)
+    local fields = {}
+    if not pci_address(opts.addr) then
+        return fields
     end
-    local ok, data = pcall(json.decode, sensors_json)
-    if not ok or type(data) ~= "table" then
-        return nil, nil
+    local device = (opts.pci_dir or "/sys/bus/pci/devices") .. "/" .. opts.addr
+    local function read(path, scale, maximum)
+        local value = measurement(read_first_line(path))
+        return value and measurement(value / (scale or 1), maximum) or nil
     end
-
-    local temperature
-    for _, wanted_label in ipairs(TEMPERATURE_LABEL_PRIORITY) do
-        for _, chip in pairs(data) do
-            if type(chip) == "table" then
-                for label, entry in pairs(chip) do
-                    if type(entry) == "table" and label:find(wanted_label, 1, true) then
-                        for key, value in pairs(entry) do
-                            if key:match("^temp%d+_input$") and type(value) == "number" then
-                                temperature = math.floor(value)
-                                break
-                            end
-                        end
-                    end
-                    if temperature then
-                        break
-                    end
-                end
-            end
-            if temperature then
-                break
-            end
-        end
-        if temperature then
+    fields.utilization = read(device .. "/gpu_busy_percent", 1, 100)
+    for _, entry in ipairs(entries(device .. "/hwmon", "^hwmon%d+$")) do
+        local hwmon = device .. "/hwmon/" .. entry
+        local driver = read_first_line(hwmon .. "/name")
+        if driver == "amdgpu" or driver == "nouveau" or driver == "i915" or driver == "xe" then
+            fields.temperature = read(hwmon .. "/temp1_input", 1000)
+            fields.fan_speed = read(hwmon .. "/fan1_input")
+            fields.current_clock_speed = read(hwmon .. "/freq1_input", 1000000)
+            -- AMD APU power1_* includes CPU/SoC consumption. Do not present
+            -- it as GPU-only power without a reliable scope discriminator.
             break
         end
     end
-
-    local fan_speed
-    for _, chip in pairs(data) do
-        if type(chip) == "table" and not fan_speed then
-            for label, entry in pairs(chip) do
-                -- Stop at the first match: without this the loop keeps walking
-                -- a chip's remaining labels and the reported speed for a
-                -- multi-fan chip depends on pairs() iteration order.
-                if not fan_speed and type(entry) == "table" and label:match("^fan%d") then
-                    for key, value in pairs(entry) do
-                        if key:match("^fan%d+_input$") and type(value) == "number" then
-                            fan_speed = math.floor(value)
-                            break
-                        end
-                    end
-                end
-            end
-        end
+    local card = entries(device .. "/drm", "^card%d+$")[1]
+    if card then
+        local drm = device .. "/drm/" .. card
+        fields.current_clock_speed = fields.current_clock_speed or read(drm .. "/gt_act_freq_mhz")
+        fields.max_clock_speed = read(drm .. "/gt_RP0_freq_mhz")
     end
-
-    return temperature, fan_speed
+    return fields
 end
 
 local function clamp(value, low, high)
@@ -502,178 +405,113 @@ function M.map_floor(spec, value)
 end
 
 --- Assembles the waybar custom-module JSON object -- text/tooltip/class/
---- percentage/alt -- from whatever fields a vendor branch (Tasks 9-11)
+--- percentage/alt -- from whatever fields a GPU query
 --- populated. Always produces valid JSON, even with no readings at all
 --- (waybar's return-type:json reads this line by line; a malformed or empty
 --- line breaks the whole module, the #2021/#2022 contract this preserves).
 function M.generate_json(fields)
-    local emoji = fields.emoji
-    local temp_lv = emoji and "85:🌋, 65:🔥, 45:☁️, ❄️" or "85:, 65:, 45:☁, ❄"
-    local util_lv = "90:, 60:󰓅, 30:󰾅, 󰾆"
-    local speedo_icon = M.map_floor(util_lv, fields.utilization or 0)
-    local thermo_icon = M.map_floor(temp_lv, fields.temperature or -999)
-
-    -- tonumber first: nvidia-smi answers "[N/A]" for query fields a card does
-    -- not support, and nvidia_query passes raw CSV strings straight through.
-    -- math.floor("[N/A]") raises, which would break the "always valid JSON"
-    -- contract waybar's return-type:json depends on.
-    local temp_num = tonumber(fields.temperature)
-    local temp_val = temp_num and math.floor(temp_num) or nil
-    local temp_clamped = temp_val and clamp(temp_val, 0, 999) or 0
-    local temp_bucket = clamp(math.floor(temp_clamped / 5) * 5, 0, 100)
-    local temp_class = "temp-" .. temp_bucket
-
-    local util_num = tonumber(fields.utilization)
-    local util_val = util_num and math.floor(util_num) or 0
-    util_val = clamp(util_val, 0, 100)
-    local util_bucket = math.floor(util_val / 10) * 10
-    local util_class = "util-" .. util_bucket
-
-    local temp_pct = clamp(temp_val or 0, 0, 100)
-
-    local tooltip = (fields.primary_gpu or "Not found") .. "\n" .. thermo_icon .. " Temperature: " .. (temp_val or "") .. "°C"
-
-    if fields.utilization then
-        tooltip = tooltip .. "\n" .. speedo_icon .. " Utilization: " .. fields.utilization .. "%"
-    end
-    if fields.current_clock_speed and fields.max_clock_speed then
-        tooltip = tooltip .. "\n Clock Speed: " .. fields.current_clock_speed .. "/" .. fields.max_clock_speed .. " MHz"
-    end
-    if fields.core_clock then
-        tooltip = tooltip .. "\n Clock Speed: " .. fields.core_clock .. " MHz"
-    end
-    if fields.power_usage then
-        if fields.power_limit then
-            tooltip = tooltip .. "\n󱪉 Power Usage: " .. fields.power_usage .. "/" .. fields.power_limit .. " W"
-        else
-            tooltip = tooltip .. "\n󱪉 Power Usage: " .. fields.power_usage .. " W"
+    local temperature = measurement(fields.temperature)
+    local utilization = measurement(fields.utilization, 100)
+    local fan = measurement(fields.fan_speed)
+    local current = measurement(fields.current_clock_speed)
+    local maximum = measurement(fields.max_clock_speed)
+    local power = measurement(fields.power_usage)
+    local limit = measurement(fields.power_limit)
+    local thermo = M.map_floor("85:, 65:, 45:, ", temperature or 0)
+    local speedo = M.map_floor("90:, 60:󰓅, 30:󰾅, 󰾆", utilization or 0)
+    local text_icon = fields.emoji
+        and M.map_floor("85:🌋, 65:🔥, 45:☁️, ❄️", temperature or 0) or thermo
+    local tooltip = {fields.primary_gpu or "GPU not found"}
+    local function add(icon, label, value, unit)
+        if value ~= nil then
+            tooltip[#tooltip + 1] = icon .. " " .. label .. ": " .. value .. " " .. unit
         end
     end
-    -- Numeric compare: read_battery_discharge returns a float, so a zero
-    -- reading on AC power stringifies as "0.0" and slipped past a string
-    -- comparison against "0", printing a bogus "Power Discharge: 0.0 W" line.
-    if fields.power_discharge and tonumber(fields.power_discharge) ~= 0 then
-        tooltip = tooltip .. "\n Power Discharge: " .. fields.power_discharge .. " W"
+    add(thermo, "Temperature", temperature, "°C")
+    add("", "Fan Speed", fan, "RPM")
+    add(speedo, "Utilization", utilization, "%")
+    if current then
+        add("", "Clock Speed", maximum and (current .. "/" .. maximum) or current, "MHz")
     end
-    if fields.fan_speed then
-        tooltip = tooltip .. "\n Fan Speed: " .. fields.fan_speed .. " RPM"
+    add("", "Power Usage", power and (limit and (power .. "/" .. limit) or power), "W")
+    if #tooltip == 1 then
+        tooltip[#tooltip + 1] = "GPU measurements unavailable"
     end
 
+    -- Missing values have an explicit state, not a fabricated temp-0/util-0.
+    local classes = {}
+    local bucket = temperature and clamp(math.floor(temperature / 5) * 5, 0, 100)
+    if bucket then classes[#classes + 1] = "temp-" .. bucket end
+    if utilization then classes[#classes + 1] = "util-" .. math.floor(utilization / 10) * 10 end
+    if not temperature then classes[#classes + 1] = "unavailable" end
     return json.encode({
-        text = thermo_icon .. " " .. (temp_val or "") .. "°C",
-        tooltip = tooltip,
-        class = {temp_class, util_class},
-        percentage = temp_pct,
-        alt = tostring(temp_bucket),
+        text = temperature and (text_icon .. " " .. math.floor(temperature) .. "°C") or " N/A",
+        tooltip = table.concat(tooltip, "\n"),
+        class = classes,
+        percentage = temperature and clamp(temperature, 0, 100) or nil,
+        alt = bucket and tostring(bucket) or "unavailable",
     })
 end
 
---- NVIDIA vendor branch. Returns (fields, suspended). When `opts.is_nouveau`
---- (the open-source driver, which nvidia-smi cannot query), falls back to
---- the same generic sensors/proc-stat/cpufreq/battery reads every other
---- "no dedicated vendor tool" path uses.
-function M.nvidia_query(opts)
-    local fields = {primary_gpu = "NVIDIA " .. tostring(opts.nvidia_gpu)}
+local function shell_quote(value)
+    return "'" .. value:gsub("'", "'\\''") .. "'"
+end
 
-    if opts.is_nouveau then
-        local temperature, fan_speed = M.read_sensors(opts.sensors_json or "")
-        fields.temperature = temperature
-        fields.fan_speed = fan_speed
-        fields.power_discharge = M.read_battery_discharge(opts.power_supply_dir or "/sys/class/power_supply")
-        local state = opts.state or {}
-        fields.utilization = M.read_cpu_utilization(state, opts.stat_file)
-        fields.current_clock_speed, fields.max_clock_speed = M.read_cpu_clock_speed(opts.cpu_sysfs_dir)
+--- NVIDIA measurements are scoped to the detected PCI address. Never query
+--- the first card implicitly, and never substitute CPU data on failure.
+function M.nvidia_query(opts)
+    local fields = {primary_gpu = "NVIDIA " .. (opts.nvidia_gpu or "GPU")}
+    if not pci_address(opts.nvidia_addr) then
         return fields, false
     end
-
+    local device = (opts.pci_devices_dir or "/sys/bus/pci/devices") .. "/" .. opts.nvidia_addr
     if opts.tired then
-        -- detect_vendor stores nvidia_addr straight from the
-        -- /sys/bus/pci/devices directory entry name, which is already
-        -- domain-qualified ("0000:01:00.0") -- prefixing another "0000:" here
-        -- built a path that never exists, so suspend was never detected and
-        -- --tired silently woke the GPU on every poll anyway.
-        local runtime_status_path = opts.runtime_status_path
-            or ((opts.pci_devices_dir or "/sys/bus/pci/devices") .. "/" .. tostring(opts.nvidia_addr) .. "/power/runtime_status")
-        local status = read_first_line(runtime_status_path)
-        if status and status:find("suspend") then
+        local status = read_first_line(opts.runtime_status_path or (device .. "/power/runtime_status"))
+        if status == "suspended" or status == "suspending" then
             return fields, true
         end
     end
-
-    local nvidia_smi_cmd = opts.nvidia_smi_cmd or "nvidia-smi"
+    if opts.is_nouveau then
+        fields = M.read_gpu_sysfs({addr = opts.nvidia_addr, pci_dir = opts.pci_devices_dir})
+        fields.primary_gpu = "NVIDIA " .. (opts.nvidia_gpu or "GPU")
+        return fields, false
+    end
     local handle = io.popen(
-        nvidia_smi_cmd
-            .. " --query-gpu=temperature.gpu,utilization.gpu,clocks.current.graphics,clocks.max.graphics,power.draw,power.limit"
+        "timeout 3s " .. shell_quote(opts.nvidia_smi_cmd or "nvidia-smi")
+            .. " --id=" .. shell_quote(opts.nvidia_addr)
+            .. " --query-gpu=temperature.gpu,utilization.gpu,clocks.current.graphics,"
+            .. "clocks.max.graphics,power.draw,power.limit"
             .. " --format=csv,noheader,nounits 2>/dev/null"
     )
     local line = handle and handle:read("*l")
-    if handle then
-        handle:close()
-    end
-    if line then
+    local success = handle and handle:close()
+    if success and line then
         local values = {}
-        for value in line:gmatch("[^,]+") do
-            values[#values + 1] = value:gsub("^%s+", ""):gsub("%s+$", "")
+        -- Preserve empty CSV columns so later measurements cannot shift.
+        for value in (line .. ","):gmatch("(.-),") do
+            values[#values + 1] = value
         end
-        fields.temperature = values[1]
-        fields.utilization = values[2]
-        fields.current_clock_speed = values[3]
-        fields.max_clock_speed = values[4]
-        fields.power_usage = values[5]
-        fields.power_limit = values[6]
+        if #values == 6 then
+            fields.temperature = measurement(values[1])
+            fields.utilization = measurement(values[2], 100)
+            fields.current_clock_speed = measurement(values[3])
+            fields.max_clock_speed = measurement(values[4])
+            fields.power_usage = measurement(values[5])
+            fields.power_limit = measurement(values[6])
+        end
     end
+    -- nvidia-smi fan.speed is a target percentage, not measured RPM.
+    -- Only expose a real RPM sensor if the selected device provides one.
+    fields.fan_speed = M.read_gpu_sysfs({addr = opts.nvidia_addr, pci_dir = opts.pci_devices_dir}).fan_speed
     return fields, false
-end
-
--- Same helper as #1901/PR #2060's altab.lua/batterynotify.lua/dconf.lua: a
--- lone "'...'" wrap doesn't survive an apostrophe inside the path itself.
-local function shell_quote(arg)
-    arg = tostring(arg)
-    arg = arg:gsub("'", "'\\''")
-    return "'" .. arg .. "'"
-end
-
---- AMD vendor branch. Parses amdgpu.py's JSON (see Configs/.local/lib/hyde/
---- amdgpu.py) with luautils.json instead of `jq`+`sed`. Falls back to the
---- generic sensors/proc-stat/cpufreq/battery reads whenever the output isn't
---- the expected object -- covers "No AMD GPUs detected." (amdgpu.py's own
---- explicit no-hardware message) *and* any of amdgpu.py's exception-branch
---- error strings, which the bash version's two-literal-substring check did
---- not (it would have tried to jq-parse those as JSON).
-function M.amd_query(opts)
-    local fields = {primary_gpu = "AMD " .. tostring(opts.amdgpu_gpu)}
-
-    local ok, decoded = pcall(json.decode, opts.amdgpu_output or "")
-    if ok and type(decoded) == "table" and decoded["GPU Temperature"] then
-        -- Each key guarded separately: a partial object (only some keys set)
-        -- must degrade to a missing field rather than index nil.
-        fields.temperature = decoded["GPU Temperature"]:gsub("°C", "")
-        fields.utilization = decoded["GPU Load"] and decoded["GPU Load"]:gsub("%%", "") or nil
-        fields.core_clock = decoded["GPU Core Clock"]
-            and decoded["GPU Core Clock"]:gsub(" GHz", ""):gsub(" MHz", "")
-            or nil
-        fields.power_usage = decoded["GPU Power Usage"] and decoded["GPU Power Usage"]:gsub(" Watts", "") or nil
-        return fields
-    end
-
-    local temperature, fan_speed = M.read_sensors(opts.sensors_json or "")
-    fields.temperature = temperature
-    fields.fan_speed = fan_speed
-    fields.power_discharge = M.read_battery_discharge(opts.power_supply_dir or "/sys/class/power_supply")
-    local state = opts.state or {}
-    fields.utilization = M.read_cpu_utilization(state, opts.stat_file)
-    fields.current_clock_speed, fields.max_clock_speed = M.read_cpu_clock_speed(opts.cpu_sysfs_dir)
-    return fields
 end
 
 local argparse = require("luautils.argparse")
 
 local VENDOR_STAT_KEY = {nvidia = "nvidia_enable", amd = "amd_enable", intel = "intel_enable"}
 
---- CLI entry point. `opts` (all optional, used by tests to avoid touching
---- the real machine): print_fn, state_suffix_override, detect_vendor_opts,
---- sensors_cmd, nvidia_smi_cmd, amdgpu_py_cmd, python_bin, lspci_cmd,
---- power_supply_dir, stat_file, cpu_sysfs_dir.
+--- CLI entry point. Tests can inject print/warn functions, a state suffix,
+--- PCI detection/sysfs roots, and the nvidia-smi executable.
 function M.cli_main(argv, opts)
     opts = opts or {}
     local print_fn = opts.print_fn or print
@@ -685,7 +523,7 @@ function M.cli_main(argv, opts)
     -- to stderr, never through print_fn/stdout.
     local warn_fn = opts.warn_fn or function(s) io.stderr:write(s, "\n") end
 
-    local parser = argparse("gpuinfo", "GPU/CPU info for the waybar custom/gpuinfo module")
+    local parser = argparse("gpuinfo", "GPU-only information for the waybar custom/gpuinfo module")
     parser:option("--use", "Only call the specified GPU"):argname("GPU")
     parser:option("--stat", "Report whether GPU is enabled (amd, intel, nvidia)"):argname("GPU")
     parser:flag("--toggle", "Toggle available GPU")
@@ -801,81 +639,28 @@ function M.cli_main(argv, opts)
         return 1
     end
 
-    local common_opts = {
-        sensors_json = opts.sensors_json,
-        stat_file = opts.stat_file,
-        cpu_sysfs_dir = opts.cpu_sysfs_dir,
-        power_supply_dir = opts.power_supply_dir,
-        state = state,
-    }
-    if not opts.sensors_json then
-        local handle = io.popen((opts.sensors_cmd or "sensors") .. " -j 2>/dev/null")
-        common_opts.sensors_json = handle and handle:read("*a") or ""
-        if handle then
-            handle:close()
-        end
-    end
-
+    local pci_dir = opts.pci_dir or (opts.detect_vendor_opts or {}).pci_dir
     local fields
     if state.nvidia_enable then
-        local nvidia_fields, suspended = M.nvidia_query({
+        local suspended
+        fields, suspended = M.nvidia_query({
             nvidia_gpu = state.nvidia_gpu,
             is_nouveau = state.nvidia_nouveau,
             nvidia_addr = state.nvidia_addr,
             tired = state.tired,
             nvidia_smi_cmd = opts.nvidia_smi_cmd,
-            sensors_json = common_opts.sensors_json,
-            stat_file = common_opts.stat_file,
-            cpu_sysfs_dir = common_opts.cpu_sysfs_dir,
-            power_supply_dir = common_opts.power_supply_dir,
-            state = state,
+            pci_devices_dir = pci_dir,
         })
         if suspended then
-            print_fn(json.encode({text = "󰤂", tooltip = nvidia_fields.primary_gpu .. " ⏾ Suspended mode"}))
+            print_fn(json.encode({text = "󰤂", tooltip = fields.primary_gpu .. " ⏾ Suspended mode"}))
             return 0
         end
-        fields = nvidia_fields
-    elseif state.amd_enable then
-        -- HOME can be unset (some systemd unit contexts); don't concatenate nil.
-        local python_bin = opts.python_bin
-            or (
-                (os.getenv("XDG_STATE_HOME") or ((os.getenv("HOME") or "/root") .. "/.local/state"))
-                .. "/hyde/python_env/bin/python"
-            )
-        local amdgpu_output = opts.amdgpu_output
-        if not amdgpu_output then
-            -- Quoted: both paths are filesystem paths that may contain spaces
-            -- or (a wrapping "'...'" alone doesn't handle) an apostrophe --
-            -- same fix as #1901/PR #2060's shell_quote in altab.lua et al.
-            local handle = io.popen(
-                shell_quote(python_bin) .. " " .. shell_quote(opts.amdgpu_py_cmd or (root .. "amdgpu.py")) .. " 2>/dev/null"
-            )
-            amdgpu_output = handle and handle:read("*a") or ""
-            if handle then
-                handle:close()
-            end
-        end
-        fields = M.amd_query({
-            amdgpu_gpu = state.amd_gpu,
-            amdgpu_output = amdgpu_output,
-            sensors_json = common_opts.sensors_json,
-            stat_file = common_opts.stat_file,
-            cpu_sysfs_dir = common_opts.cpu_sysfs_dir,
-            power_supply_dir = common_opts.power_supply_dir,
-            state = state,
-        })
-    elseif state.intel_enable then
-        fields = {primary_gpu = "Intel " .. tostring(state.intel_gpu)}
-        fields.temperature, fields.fan_speed = M.read_sensors(common_opts.sensors_json)
-        fields.power_discharge = M.read_battery_discharge(common_opts.power_supply_dir or "/sys/class/power_supply")
-        fields.utilization = M.read_cpu_utilization(state, common_opts.stat_file)
-        fields.current_clock_speed, fields.max_clock_speed = M.read_cpu_clock_speed(common_opts.cpu_sysfs_dir)
+    elseif state.amd_enable or state.intel_enable then
+        local vendor = state.amd_enable and "amd" or "intel"
+        fields = M.read_gpu_sysfs({addr = state[vendor .. "_addr"], pci_dir = pci_dir})
+        fields.primary_gpu = (vendor == "amd" and "AMD " or "Intel ") .. (state[vendor .. "_gpu"] or "GPU")
     else
-        fields = {primary_gpu = "Not found"}
-        fields.temperature, fields.fan_speed = M.read_sensors(common_opts.sensors_json)
-        fields.power_discharge = M.read_battery_discharge(common_opts.power_supply_dir or "/sys/class/power_supply")
-        fields.utilization = M.read_cpu_utilization(state, common_opts.stat_file)
-        fields.current_clock_speed, fields.max_clock_speed = M.read_cpu_clock_speed(common_opts.cpu_sysfs_dir)
+        fields = {primary_gpu = "GPU not found"}
     end
     fields.emoji = state.emoji
 

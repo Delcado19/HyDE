@@ -17,6 +17,9 @@ is adding a file.
 
 ## Cases
 
+GPU widget behavior, data sources, limitations, and regression coverage are
+documented in [GPU information](../docs/gpuinfo.md).
+
 | Case | Checks |
 | --- | --- |
 | `test_app_wrapper.sh` | Launching through either `app.sh` execution path does not leak an unrelated non-boolean `DEBUG` value into app2unit or xdg-terminal-exec |

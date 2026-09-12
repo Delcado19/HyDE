@@ -14,7 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 - Waybar: `gpuinfo` is now `gpuinfo.lua`, a Lua rewrite of `gpuinfo.sh` — far fewer subprocess calls per poll and parsing that is maintainable instead of a `lspci | grep | awk | sed` pipeline
-- Waybar: `gpuinfo` temperature sensor matching now follows an explicit priority order (GPU readings win over CPU-proxy readings) rather than whatever order `sensors` happened to print
+- Waybar: `gpuinfo` only displays measurements belonging to the selected GPU; CPU, generic sensor, and battery-discharge fallbacks are removed. Missing readings remain unavailable. Category icons match the shell version, with a lightning bolt for GPU power.
 - Waybar: `gpuinfo` state now lives in `${XDG_RUNTIME_DIR:-/tmp}/hyde-$UID-gpuinfo<suffix>.json`
 
 ### Fixed

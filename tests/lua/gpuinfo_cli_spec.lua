@@ -56,10 +56,11 @@ local warn_lines = {}
 local code1, out1 = run({}, {
     warn_fn = function(s) warn_lines[#warn_lines + 1] = s end,
 })
+check(code1 == 0, "cold start failed")
 check(#warn_lines > 0, "the cold-start 'Initialized: ...' diagnostic did not go through warn_fn at all")
 for line in out1:gmatch("[^\n]+") do
     local ok = pcall(json.decode, line)
-    check(ok or line:match("^Error"), "a cold-start stdout line was neither valid JSON nor the documented error message: " .. line)
+    check(ok, "a cold-start stdout line was not valid JSON: " .. line)
 end
 
 -- --stat <vendor> reports "GPU not enabled." and a nonzero exit for a vendor
@@ -72,7 +73,7 @@ check(out2:find("GPU not enabled%."), "--stat for an undetected vendor did not p
 -- --stat with an invalid vendor name reports the documented usage error.
 local code3, out3 = run({"--stat", "bogus"})
 check(code3 ~= 0, "--stat with an invalid vendor name did not exit non-zero")
-check(out3:find("Invalid argument for %-%-stat"), "--stat with an invalid vendor name did not print the documented error")
+check(out3:find("Invalid argument for %-%-stat"), "--stat with an invalid vendor name did not print a usage error")
 
 -- --use is rejected the same way *before* it becomes part of the state
 -- suffix -- an unchecked value would otherwise let a cold start read/write
@@ -101,7 +102,7 @@ local first_warns, second_warns = {}, {}
 run({}, {warn_fn = function(s) first_warns[#first_warns + 1] = s end})
 run({}, {warn_fn = function(s) second_warns[#second_warns + 1] = s end})
 check(#first_warns > 0, "the first poll on a machine with no supported GPU did not run detection at all")
-check(#second_warns == 0, "detection re-ran on the second poll even though it had already run: " .. table.concat(second_warns, " | "))
+check(#second_warns == 0, "detection re-ran on the second poll: " .. table.concat(second_warns, " | "))
 
 -- --reset clears stale flags, matching the bash version's `rm -fr` of the
 -- state file that its own --help still advertises -- but a flag passed on the
@@ -121,42 +122,5 @@ local reset_with_flag = gpuinfo.read_state("_cli_test")
 check(reset_with_flag.tired == true, "--reset wiped a --tired flag passed on the same invocation")
 
 os.remove(gpuinfo.state_path("_cli_test"))
-
--- The AMD branch's own command construction must survive an apostrophe in
--- python_bin/amdgpu_py_cmd -- same class of bug as #1901/PR #2060's
--- shell_quote fix in altab.lua et al., caught here in review: a bare
--- "'...'" wrap alone breaks on one, so the command silently returns nothing
--- and this falls back to generic sensor readings instead of surfacing real
--- AMD data.
-local amd_suffix = "_cli_test_amd_quote"
-os.remove(gpuinfo.state_path(amd_suffix))
-gpuinfo.write_state(amd_suffix, {
-    detected = true,
-    amd_enable = true,
-    amd_gpu = "Test GPU",
-    available = {"amd"},
-    priority = "amd",
-})
-local quote_dir = work_dir .. "/o'brien"
-os.execute('mkdir -p "' .. quote_dir .. '"')
-local fake_python = quote_dir .. "/python"
-local script = assert(io.open(fake_python, "w"))
-script:write([[#!/bin/sh
-cat <<'JSON'
-{"GPU Temperature": "62°C", "GPU Load": "45.0%", "GPU Core Clock": "1500 MHz", "GPU Power Usage": "120 Watts"}
-JSON
-]])
-script:close()
-os.execute('chmod +x "' .. fake_python .. '"')
-local _, quote_out = run({}, {
-    state_suffix_override = amd_suffix,
-    python_bin = fake_python,
-    amdgpu_py_cmd = fake_python, -- content ignored by the fake script; just needs to exist as an argument
-})
-check(
-    quote_out:find("62"),
-    "an apostrophe in python_bin broke the AMD command's quoting, fell back to generic sensors instead: " .. quote_out
-)
-os.remove(gpuinfo.state_path(amd_suffix))
 
 os.exit(failures == 0 and 0 or 1)
