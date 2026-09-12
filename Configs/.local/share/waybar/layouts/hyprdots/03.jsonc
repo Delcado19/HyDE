@@ -23,7 +23,7 @@
             "cpu",
             "memory",
             "custom/cpuinfo",
-            "custom/lact"
+            "custom/gpuinfo"
         ]
     },
     "group/pill#left2": {

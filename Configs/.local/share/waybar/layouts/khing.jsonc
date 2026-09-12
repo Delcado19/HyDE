@@ -49,7 +49,7 @@
       "pulseaudio#microphone",
       "battery",
       "power-profiles-daemon",
-      "custom/lact",
+      "custom/gpuinfo",
       "custom/cpuinfo",
       "custom/sensorsinfo",
       "custom/swaync",

@@ -19,8 +19,7 @@
         "orientation": "inherit",
         "modules": [
             "cpu",
-            "memory",
-            "custom/lact"
+            "memory"
         ]
     },
     "group/pill#left2": {

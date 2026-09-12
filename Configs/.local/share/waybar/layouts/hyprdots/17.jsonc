@@ -54,7 +54,7 @@
             "pulseaudio",
             "pulseaudio#microphone",
             "battery",
-            "custom/lact",
+            "custom/gpuinfo",
             "custom/cpuinfo",
             "custom/sensorsinfo",
             "custom/swaync",
