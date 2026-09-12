@@ -41,7 +41,7 @@
             "cpu",
             "memory",
             "custom/cpuinfo",
-            "custom/gpuinfo"
+            "custom/lact"
         ]
     },
     "modules-right": [

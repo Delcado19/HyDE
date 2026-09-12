@@ -45,7 +45,6 @@ Options:
     -p, --pre              Run pre-install only (Python environment setup)
     -n, --no-nvidia        Ignore nvidia actions
     --lact                 Install and enable LACT GPU monitoring
-    --no-lact              Skip LACT GPU monitoring
     -h, --shell            Re-evaluate shell configuration
     -m, --no-theme         Skip theme installation
     -t, --test             Test run (dry-run)
@@ -56,6 +55,7 @@ Common combinations:
     ./install.sh -p           # Pre-install only (run first if restore fails)
     ./install.sh -r           # Restore configs and dotfiles only
     ./install.sh -irs         # Install, restore, and services
+    ./install.sh --defaults --lact  # Silent install with LACT and lactd
     ./install.sh -irsn       # Full install without nvidia
 
 NOTE:
@@ -104,10 +104,6 @@ while [[ $# -gt 0 ]]; do
 		lact=1
 		shift
 		;;
-	--no-lact)
-		lact=0
-		shift
-		;;
 	-h | --shell)
 		export flg_Shell=1
 		print_log -r "[shell] " -b "Reevaluate :: " "shell options"
@@ -135,13 +131,29 @@ if [ ${#operations[@]} -eq 0 ]; then
 	operations=("install" "restore" "services")
 fi
 
+# An existing LACT package or service means the user already opted in. Avoid
+# asking again and let the normal services step keep lactd enabled.
+if [ "${lact}" -eq 2 ] && {
+	(command -v pacman >/dev/null 2>&1 && pacman -Qq lact >/dev/null 2>&1) ||
+	systemctl cat lactd.service >/dev/null 2>&1
+}; then
+	lact=1
+	print_log -g "[LACT] " -b "detected :: " "already installed; enabling lactd"
+fi
+
 if [ "${lact}" -eq 2 ]; then
 	if [ -t 0 ] && [ -z "${use_default:-}" ]; then
-		read -r -p "Install LACT GPU monitoring and enable lactd? [y/N] " lact_answer
+		read -r -p "Install GPU Info tools (LACT) for cross-vendor GPU metrics and enable the lactd service? [y/N] " lact_answer
 		[[ "${lact_answer}" == [Yy]* ]] && lact=1 || lact=0
 	else
 		lact=0
 	fi
+fi
+
+# Silent installs stay minimal by default; opting into LACT always includes
+# the service operation so both --lact and --defaults --lact enable lactd.
+if [ "${lact}" -eq 1 ] && [[ ! " ${operations[*]} " =~ " services " ]]; then
+	operations+=("services")
 fi
 
 export flg_DryRun=$dry_run
@@ -150,6 +162,17 @@ export flg_Lact=$lact
 export flg_ThemeInstall=$theme_install
 HYDE_LOG="$(date +'%y%m%d_%Hh%Mm%Ss')"
 export HYDE_LOG
+
+# Authenticate before package installation so sudo does not interrupt the
+# later lactd service step halfway through an otherwise silent run.
+if [ "${lact}" -eq 1 ] && [ "${dry_run}" -eq 0 ] && [ "${EUID}" -ne 0 ] &&
+	[[ " ${operations[*]} " =~ " services " ]]; then
+	print_log -g "[sudo] " -b "auth :: " "Authentication required before installing/enabling LACT"
+	sudo -v || {
+		print_log -err "[sudo] " -crit "ERROR" "Authentication failed"
+		exit 1
+	}
+fi
 
 if [ $dry_run -eq 1 ]; then
 	print_log -n "[test-run] " -b "enabled :: " "Testing without executing"

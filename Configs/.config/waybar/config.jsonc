@@ -51,7 +51,7 @@
       "pulseaudio#microphone",
       "battery",
       "power-profiles-daemon",
-      "custom/gpuinfo",
+      "custom/lact",
       "custom/cpuinfo",
       "custom/sensorsinfo",
       "custom/swaync",
