@@ -1,46 +1,56 @@
+/* Waybar cannot adapt labels to wallpaper luminance, so use a neutral regular material. */
+@define-color macos-bar-surface rgba(28, 28, 30, 0.88);
+@define-color macos-elevated-surface rgba(44, 44, 46, 0.98);
+@define-color macos-label #F5F5F7;
+@define-color macos-secondary-label #AEAEB2;
+@define-color macos-separator rgba(255, 255, 255, 0.18);
+@define-color macos-accent #0066CC;
+
 * {
     border: none;
     border-radius: 0;
-    font-family: "SF Pro Text", "SF Pro Display", sans-serif;
+    font-family: "SF Pro Text", "Noto Sans", sans-serif;
     font-size: 13px;
+    font-weight: 400;
     min-height: 0;
 }
 
 window#waybar {
-    background-color: alpha(@wallbash_pry1, 0.88);
-    color: @wallbash_txt1;
+    border-bottom: 1px solid @macos-separator;
+    background-color: @macos-bar-surface;
+    color: @macos-label;
 }
 
 .modules-left,
 .modules-center,
 .modules-right {
-    padding: 0 8px;
+    padding: 0 7px;
 }
 
 .module {
     margin: 0;
-    padding: 0 6px;
-    color: @wallbash_txt1;
+    padding: 0 5px;
+    color: @macos-label;
 }
 
 #custom-launcher {
-    padding: 0 8px 0 4px;
-    font-size: 17px;
+    padding: 0 8px 0 3px;
+    font-size: 16px;
 }
 
 #window {
-    padding: 0 9px 0 4px;
+    padding: 0 8px 0 4px;
     font-weight: 600;
 }
 
 #custom-text,
 #custom-help {
-    padding: 0 7px;
+    padding: 0 6px;
 }
 
 #clock {
-    padding-right: 4px;
-    font-weight: 600;
+    padding-right: 3px;
+    font-weight: 500;
 }
 
 #tray {
@@ -53,6 +63,11 @@ window#waybar {
 
 #tray > .needs-attention {
     -gtk-icon-effect: highlight;
+}
+
+#network.disconnected,
+#pulseaudio.muted {
+    color: @macos-secondary-label;
 }
 
 #workspaces,
@@ -78,31 +93,37 @@ window#waybar {
 button {
     margin: 3px 1px;
     padding: 0 6px;
-    color: @wallbash_txt1;
     background: transparent;
     box-shadow: none;
+    color: @macos-label;
     text-shadow: none;
-    transition: background-color 100ms ease-out;
+    transition: background-color 120ms ease-out;
 }
 
 button:hover,
 .module:hover {
     border-radius: 5px;
-    background-color: alpha(@wallbash_txt1, 0.16);
+    background-color: alpha(@macos-label, 0.14);
+}
+
+button:focus,
+menu menuitem:focus {
+    box-shadow: inset 0 0 0 1px @macos-accent;
 }
 
 #workspaces button.active,
 #taskbar button.active {
     border-radius: 5px;
-    background-color: alpha(@wallbash_txt1, 0.24);
+    background-color: @macos-accent;
+    color: @macos-label;
 }
 
 tooltip,
 menu {
-    border: 1px solid alpha(@main-fg, 0.24);
-    border-radius: 8px;
-    background-color: @main-bg;
-    color: @main-fg;
+    border: 1px solid @macos-separator;
+    border-radius: 10px;
+    background-color: @macos-elevated-surface;
+    color: @macos-label;
 }
 
 tooltip * {
@@ -110,17 +131,21 @@ tooltip * {
 }
 
 menu menuitem {
-    padding: 5px 10px;
-    color: @main-fg;
+    min-height: 20px;
+    padding: 4px 12px;
+    color: @macos-label;
     transition: background-color 100ms ease-out;
 }
 
 menu menuitem:hover {
-    background-color: alpha(@main-fg, 0.16);
+    border-radius: 5px;
+    background-color: @macos-accent;
+    color: @macos-label;
 }
 
 #tray menu separator {
     min-height: 1px;
+    background-color: @macos-separator;
 }
 
 #tray menu menuitem check,
