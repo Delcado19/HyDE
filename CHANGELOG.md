@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Waybar: add VSCodium and Chromium icon rules to window module
 
 ### Fixed
+- Waybar: honor an optional `$WAYBAR_LAYOUT` in `hypr.theme` during color/theme updates, selecting the layout and matching stylesheet temporarily. Restore the previous layout and independently selected CSS when leaving themes with a preset, preserving them across repeated updates and preset-to-preset switches. Fix theme setting lookup for names containing spaces such as `Mac OS`.
 - Waybar: repair the macOS preset, remove its blocking wallpaper decoder, use an accessible semantic palette, and restore spacing between HyDE menu icons and labels
 - Hyprland: prevent window borders from being clipped when snapping to monitor edges in 0-gap workflows 
 - Hyprland: windows that cannot join a group, such as pyprland's dropdown terminal, get the same border colors as every other window; `general.col.nogroup_border` and `nogroup_border_active` were never set, so those windows kept Hyprland's magenta and yellow defaults whatever the theme or wallbash mode
