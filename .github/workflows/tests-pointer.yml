@@ -1,0 +1,151 @@
+name: Tests pointer
+
+# Keeps the `tests` submodule on dev pointing at HyDE-Project/tests main.
+# PR checks already pick the tests branch by name (see test.yml), so the
+# pointer only matters for runs without a matching branch: pushes to
+# dev/rc/master and PRs without a tests branch. It used to be bumped by hand
+# after every tests merge.
+#
+# When the pointer is behind, this moves it to tests/main, runs the suite
+# against that, and only if it passes opens (or updates) a PR from
+# `ci/tests-pointer` into dev. It never pushes to dev itself.
+#
+# PRs opened with GITHUB_TOKEN don't trigger other workflows, so the PR gets
+# no regular checks of its own; that's why the suite runs here first.
+
+on:
+  push:
+    branches:
+      - dev
+  # Merges in the tests repo don't trigger anything here. Scheduled and
+  # manual runs start from the default branch, so they check out dev
+  # explicitly below.
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: tests-pointer
+  cancel-in-progress: false
+
+env:
+  TARGET_BRANCH: dev
+  TESTS_REPO: HyDE-Project/tests
+  TESTS_BRANCH: main
+  PR_BRANCH: ci/tests-pointer
+
+jobs:
+  tests-pointer:
+    name: Point tests at tests/main
+    # Only the upstream repository; forks never run this.
+    if: github.repository == 'HyDE-Project/HyDE'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 1
+
+      - name: Compare the pointer with tests main
+        id: compare
+        run: |
+          set -eu
+          current=$(git ls-tree HEAD tests | awk '{print $3}')
+          latest=$(git ls-remote "https://github.com/$TESTS_REPO.git" "refs/heads/$TESTS_BRANCH" | cut -f1)
+          # An empty answer is a lookup failure, not "nothing to do".
+          if [ -z "$current" ] || [ -z "$latest" ]; then
+            echo "::error::could not read the pointer ('$current') or $TESTS_REPO $TESTS_BRANCH ('$latest')"
+            exit 1
+          fi
+          echo "current=$current" >>"$GITHUB_OUTPUT"
+          echo "latest=$latest" >>"$GITHUB_OUTPUT"
+          if [ "$current" = "$latest" ]; then
+            echo "up_to_date=true" >>"$GITHUB_OUTPUT"
+            echo "tests already points at $TESTS_BRANCH ($latest)"
+          else
+            echo "up_to_date=false" >>"$GITHUB_OUTPUT"
+            echo "tests points at $current, $TESTS_BRANCH is $latest"
+          fi
+
+      - name: Close an obsolete pointer PR
+        if: steps.compare.outputs.up_to_date == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$PR_BRANCH" --base "$TARGET_BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$pr" ]; then
+            gh pr close "$pr" --repo "$GITHUB_REPOSITORY" --delete-branch \
+              --comment "\`$TARGET_BRANCH\` already points \`tests\` at $TESTS_BRANCH, closing."
+          fi
+
+      - name: Move the pointer to tests main
+        if: steps.compare.outputs.up_to_date == 'false'
+        env:
+          CURRENT: ${{ steps.compare.outputs.current }}
+          LATEST: ${{ steps.compare.outputs.latest }}
+        run: |
+          set -eu
+          git submodule update --init tests
+          git -C tests fetch --quiet origin "$TESTS_BRANCH"
+          git -C tests checkout --quiet --detach "$LATEST"
+          # A unique delimiter, so no commit subject can end the value early.
+          delim="TESTS_LOG_$(date +%s%N)"
+          {
+            echo "TESTS_LOG<<$delim"
+            if git -C tests merge-base --is-ancestor "$CURRENT" "$LATEST" 2>/dev/null; then
+              git -C tests log --oneline --no-decorate "$CURRENT..$LATEST"
+            else
+              echo "(the previous pointer $CURRENT is not on $TESTS_BRANCH)"
+            fi
+            echo "$delim"
+          } >>"$GITHUB_ENV"
+
+      - name: Install test dependencies
+        if: steps.compare.outputs.up_to_date == 'false'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends lua5.4 lua-filesystem lua-socket lua-argparse lua-dkjson shellcheck fish
+          sudo ln -sf /usr/bin/lua5.4 /usr/local/bin/lua
+          sudo ln -sf /usr/bin/luac5.4 /usr/local/bin/luac
+
+      # A failure stops here: no PR is opened for a pointer that breaks dev.
+      - name: Run the test suite against the new pointer
+        if: steps.compare.outputs.up_to_date == 'false'
+        run: sh tests/run.sh
+
+      - name: Open or update the pointer PR
+        if: steps.compare.outputs.up_to_date == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT: ${{ steps.compare.outputs.current }}
+          LATEST: ${{ steps.compare.outputs.latest }}
+        run: |
+          set -eu
+          short=$(printf '%.7s' "$LATEST")
+          title="chore(tests): point tests at $TESTS_BRANCH ($short)"
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          git checkout --quiet -B "$PR_BRANCH"
+          git add tests
+          git commit --quiet -m "$title" -m "$TESTS_LOG"
+          git push --quiet --force origin "$PR_BRANCH"
+
+          body=$(printf '%s\n\n%s\n\n```\n%s\n```\n\n%s\n' \
+            "Moves the \`tests\` submodule on \`$TARGET_BRANCH\` from \`$CURRENT\` to \`$TESTS_REPO\` $TESTS_BRANCH \`$LATEST\`." \
+            "New in tests since the previous pointer:" \
+            "$TESTS_LOG" \
+            "The full suite passed against the new pointer in [this run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID). Opened by the \`tests-pointer\` workflow; PRs opened with the workflow token get no checks of their own, so that run is the check.")
+
+          pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$PR_BRANCH" --base "$TARGET_BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+            echo "updated #$pr"
+          else
+            gh pr create --repo "$GITHUB_REPOSITORY" --base "$TARGET_BRANCH" --head "$PR_BRANCH" --title "$title" --body "$body"
+          fi
