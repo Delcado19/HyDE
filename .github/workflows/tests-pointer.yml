@@ -34,8 +34,8 @@ concurrency:
 
 env:
   TARGET_BRANCH: poc/tests-pointer-dev
-  TESTS_REPO: HyDE-Project/tests
-  TESTS_BRANCH: main
+  TESTS_REPO: Delcado19/tests
+  TESTS_BRANCH: poc/failing-suite
   PR_BRANCH: ci/tests-pointer
 
 jobs:
