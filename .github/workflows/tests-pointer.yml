@@ -16,7 +16,7 @@ name: Tests pointer
 on:
   push:
     branches:
-      - dev
+      - poc/tests-pointer-dev
   # Merges in the tests repo don't trigger anything here. Scheduled and
   # manual runs start from the default branch, so they check out dev
   # explicitly below.
@@ -33,7 +33,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  TARGET_BRANCH: dev
+  TARGET_BRANCH: poc/tests-pointer-dev
   TESTS_REPO: HyDE-Project/tests
   TESTS_BRANCH: main
   PR_BRANCH: ci/tests-pointer
@@ -42,7 +42,7 @@ jobs:
   tests-pointer:
     name: Point tests at tests/main
     # Only the upstream repository; forks never run this.
-    if: github.repository == 'HyDE-Project/HyDE'
+    if: github.repository == 'Delcado19/HyDE'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout target branch
