@@ -10,8 +10,9 @@ name: Tests pointer
 # against that, and only if it passes opens (or updates) a PR from
 # `ci/tests-pointer` into dev. It never pushes to dev itself.
 #
-# PRs opened with GITHUB_TOKEN don't trigger other workflows, so the PR gets
-# no regular checks of its own; that's why the suite runs here first.
+# The PR comes from the workflow token, so its regular checks don't start on
+# their own: they wait for a maintainer to approve them in the PR. That's why
+# the suite runs here first, and this run is linked from the PR body.
 
 on:
   push:
@@ -140,7 +141,7 @@ jobs:
             "Moves the \`tests\` submodule on \`$TARGET_BRANCH\` from \`$CURRENT\` to \`$TESTS_REPO\` $TESTS_BRANCH \`$LATEST\`." \
             "New in tests since the previous pointer:" \
             "$TESTS_LOG" \
-            "The full suite passed against the new pointer in [this run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID). Opened by the \`tests-pointer\` workflow; PRs opened with the workflow token get no checks of their own, so that run is the check.")
+            "The full suite passed against the new pointer in [this run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID). Opened by the \`tests-pointer\` workflow; its regular checks wait for approval, since the PR comes from the workflow token; until then, that run is the check.")
 
           pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$PR_BRANCH" --base "$TARGET_BRANCH" --state open --json number --jq '.[0].number // empty')
           if [ -n "$pr" ]; then
