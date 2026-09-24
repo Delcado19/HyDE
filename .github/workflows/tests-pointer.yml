@@ -92,7 +92,7 @@ jobs:
         run: |
           set -eu
           git submodule update --init tests
-          git -C tests fetch --quiet origin "$TESTS_BRANCH"
+          git -C tests fetch --quiet "https://github.com/$TESTS_REPO.git" "$TESTS_BRANCH"
           git -C tests checkout --quiet --detach "$LATEST"
           # A unique delimiter, so no commit subject can end the value early.
           delim="TESTS_LOG_$(date +%s%N)"
